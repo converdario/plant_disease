@@ -1,4 +1,4 @@
-folder = "D:\Vari\Uni\Magistrale\Hands-On\Image Processing\plant_disease\public\dataset\Olive_leaf\train\aculus_olearius";
+folder = "D:\Vari\Uni\Magistrale\Hands-On\Image Processing\plant_disease\public\dataset\Olive_leaf\train\aculus_olearius"; 
 imageFiles = dir(fullfile(folder, '*.jpg'));
 imageFiles = [imageFiles; dir(fullfile(folder, '*.JPG'))];
 
@@ -8,31 +8,33 @@ outputHist   = fullfile(folder, 'ROI_Histogram');
 if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
 if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 
+% === 3. Ciclo immagini ===
 for k = 1:length(imageFiles)
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
     
+    % === 4. Conversione RGB → L*a*b* ===
     labImage = rgb2lab(rgbImage);
     L = labImage(:,:,1);
     a = labImage(:,:,2);
     b = labImage(:,:,3);
 
-    %% KMeans
+    %% === Metodo 1: K-means (su a* e b*) ===
     ab = im2single(cat(3, a, b));
     pixelData = reshape(ab, [], 2);
     nColors = 3;
     [cluster_idx, ~] = kmeans(pixelData, nColors, 'Distance', 'sqEuclidean', 'Replicates', 3);
     pixelLabels = reshape(cluster_idx, size(rgbImage,1), size(rgbImage,2));
     
-    % Trova cluster con L* più basso
+    % Trova cluster con L* più basso (presumibilmente infetto)
     meanL = zeros(nColors, 1);
     for i = 1:nColors
         meanL(i) = mean(L(pixelLabels == i), 'all');
     end
-    
     [~, diseaseCluster] = min(meanL);
     maskKMeans = pixelLabels == diseaseCluster;
 
+    % Applica maschera all'immagine
     ROI_kmeans = rgbImage;
     for ch = 1:3
         temp = ROI_kmeans(:,:,ch);
@@ -40,14 +42,17 @@ for k = 1:length(imageFiles)
         ROI_kmeans(:,:,ch) = temp;
     end
 
+    % Salva risultato
     imwrite(ROI_kmeans, fullfile(outputKMeans, ['K_', imageFiles(k).name]));
 
-    %% Thresholding su canale a*
+    %% === Metodo 2: Thresholding su canale a* ===
     aChannel = a;
+    % Normalizza a* per istogramma
     aChannel = mat2gray(aChannel);
-    level = graythresh(aChannel);
+    level = graythresh(aChannel);  % Otsu threshold
     maskHist = imbinarize(aChannel, level);
 
+    % Applica maschera all'immagine
     ROI_hist = rgbImage;
     for ch = 1:3
         temp = ROI_hist(:,:,ch);
@@ -55,12 +60,14 @@ for k = 1:length(imageFiles)
         ROI_hist(:,:,ch) = temp;
     end
 
+    % Salva risultato
     imwrite(ROI_hist, fullfile(outputHist, ['H_', imageFiles(k).name]));
 
-%     figure;
-%     subplot(1,3,1), imshow(rgbImage), title('Originale');
-%     subplot(1,3,2), imshow(ROI_kmeans), title('K-means ROI');
-%     subplot(1,3,3), imshow(ROI_hist), title('Histogram ROI');
-%     pause(0.5);
-%     close all;
+    % Visualizza opzionalmente
+    figure;
+    subplot(1,3,1), imshow(rgbImage), title('Originale');
+    subplot(1,3,2), imshow(ROI_kmeans), title('K-means ROI');
+    subplot(1,3,3), imshow(ROI_hist), title('Histogram ROI');
+    pause(0.5);  % oppure waitforbuttonpress;
+    close all;
 end
