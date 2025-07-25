@@ -1,11 +1,20 @@
 clear, clc
+%warning('off', 'all');
+%tic
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'Olive_leaf', 'train', 'aculus_olearius');
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'Olive_leaf', 'train', 'olive_peacock_spot');
 imageFiles = dir(fullfile(folder, '*.jpg'));
 imageFiles = [imageFiles; dir(fullfile(folder, '*.JPG'))];
-
 num_images = length(imageFiles);
+allExtractedFeatures = table(...
+    'Size', [0, 11], ... % 0 righe inizialmente, 13 colonne (3 info + 5 KMeans + 5 Hist)
+    'VariableTypes', {'string', ... % ImageName
+                      'double', 'double', 'double', 'double', 'double', ... % KMeans_Energy, ..., Entropy
+                      'double', 'double', 'double', 'double', 'double'}, ... % Hist_Energy, ..., Entropy
+    'VariableNames', {'ImageName', ...
+                     'KMeans_Energy', 'KMeans_Contrast', 'KMeans_Correlation', 'KMeans_Homogeneity', 'KMeans_Entropy', ...
+                     'Hist_Energy', 'Hist_Contrast', 'Hist_Correlation', 'Hist_Homogeneity', 'Hist_Entropy'}); %tabella che conterrà i risultati in output 
 
 outputKMeans = fullfile(folder, 'ROI_KMeans');
 outputHist   = fullfile(folder, 'ROI_Histogram');
@@ -22,6 +31,7 @@ for k = 1:length(imageFiles)
     a = labImage(:,:,2);
     b = labImage(:,:,3);
 
+   
     %% KMeans
     ab = im2single(cat(3, a, b));
     pixelData = reshape(ab, [], 2);
@@ -84,7 +94,7 @@ for k = 1:length(imageFiles)
     props_kmeans = graycoprops(glcm_kmeans);
     props_hist = graycoprops(glcm_hist);
 
-    % Calculo entropia (non inclusa in graycoprops)
+    % Calcolo entropia (non inclusa in graycoprops)
     entropy_kmeans = zeros(1, size(glcm_kmeans, 3));
     for i = 1:size(glcm_kmeans, 3)
         temp_glcm = glcm_kmeans(:,:,i); % Estrazione matrice 2D i-esima
@@ -114,6 +124,20 @@ for k = 1:length(imageFiles)
     mean_correlation_hist = mean([props_hist.Correlation]);
     mean_homogeneity_hist = mean([props_hist.Homogeneity]);
     mean_entropy_hist = mean(entropy_hist);
+
+    newRow = {imageFiles(k).name, ... 
+              mean_energy_kmeans, ...
+              mean_contrast_kmeans, ...
+              mean_correlation_kmeans, ...
+              mean_homogeneity_kmeans, ...
+              mean_entropy_kmeans, ...
+              mean_energy_hist, ...
+              mean_contrast_hist, ...
+              mean_correlation_hist, ...
+              mean_homogeneity_hist, ...
+              mean_entropy_hist};
+            
+    allExtractedFeatures = [allExtractedFeatures; newRow]; % aggiunta alla tabella della riga con le feature calcolate
     
     fprintf('Elaborata immagine %d/%d: %s\n', k, num_images, imageFiles(k).name);
     fprintf('  K-Means ROI: Energy=%.4f, Contrast=%.4f, Correlation=%.4f, Homogeneity=%.4f, Entropy=%.4f\n', ... 
@@ -132,3 +156,11 @@ for k = 1:length(imageFiles)
 
 
 end
+
+save('all_extracted_texture_features.mat', 'allExtractedFeatures');
+fprintf('\nTutte le feature sono state estratte e salvate in all_extracted_texture_features.mat\n');
+
+%tempo_trascorso = toc;
+%tempo_trascorso = datestr(tempo_trascorso/(24*3600), 'HH:MM:SS');
+%disp(['Il tempo di elaborazione è stato: ', tempo_trascorso]) ;
+
