@@ -6,7 +6,6 @@ warning('off', 'stats:kmeans:FailedToConvergeRep');
 currentScriptFolder = fileparts(mfilename('fullpath'));
 folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'Olive_leaf', 'train', 'olive_peacock_spot');
 imageFiles = dir(fullfile(folder, '*.jpg'));
-imageFiles = [imageFiles; dir(fullfile(folder, '*.JPG'))];
 num_images = length(imageFiles);
 allExtractedFeatures = table(...
     'Size', [0, 11], ... % 0 righe inizialmente, 13 colonne (3 info + 5 KMeans + 5 Hist)
@@ -23,8 +22,8 @@ outputHist   = fullfile(folder, 'ROI_Histogram');
 if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
 if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 
-%for k = 1:100
-for k = 1:length(imageFiles)
+for k = 1:100
+%for k = 1:length(imageFiles)
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
     
@@ -34,21 +33,45 @@ for k = 1:length(imageFiles)
     b = labImage(:,:,3);
 
    
-    %% KMeans
-    ab = im2single(cat(3, a, b));
-    pixelData = reshape(ab, [], 2);
-    nColors = 3;
-    [cluster_idx, ~] = kmeans(pixelData, nColors, 'MaxIter', 1000, 'Distance', 'sqEuclidean', 'Replicates', 3);
+    lab_single = im2single(labImage);
+    pixelData = reshape(lab_single, [], 3); % Usiamo tutti i canali L, a, b
+    
+    nColors = 3; 
+    
+    % Applichiamo K-Means direttamente a tutta l'immagine
+    [cluster_idx, ~] = kmeans(pixelData, nColors, 'Distance', 'sqEuclidean', 'Replicates', 3);
     pixelLabels = reshape(cluster_idx, size(rgbImage,1), size(rgbImage,2));
     
-    % Trova cluster con L* più basso
-    meanL = zeros(nColors, 1);
-    for i = 1:nColors
-        meanL(i) = mean(L(pixelLabels == i), 'all');
+    % --- Identificazione Automatica dei Cluster ---
+    % Logica deduttiva basata sui colori per assegnare i 3 cluster:
+    % 1. Sfondo: Ipotizziamo sia il cluster che tocca maggiormente i bordi
+    % 2. Foglia Sana: Valore a* più basso (più verde)
+    % 3. Malattia: Valore a* più alto (più marrone/giallo/necrotico)
+    
+    borderMask = true(size(pixelLabels));
+    borderMask(2:end-1, 2:end-1) = false;
+    
+    count1 = sum(pixelLabels(borderMask) == 1);
+    count2 = sum(pixelLabels(borderMask) == 2);
+    count3 = sum(pixelLabels(borderMask) == 3);
+    
+    % Trova il cluster che domina i bordi e scartalo (Sfondo)
+    [~, bgCluster] = max([count1, count2, count3]);
+    
+    % Calcola la media del canale a* per i due cluster rimanenti
+    meanA = zeros(3, 1);
+    for i = 1:3
+        if i ~= bgCluster
+            meanA(i) = mean(a(pixelLabels == i)); 
+        else
+            meanA(i) = -Inf; % Ignoriamo lo sfondo
+        end
     end
     
-    [~, diseaseCluster] = min(meanL);
-    maskKMeans = pixelLabels == diseaseCluster;
+    % La malattia è il cluster con il valore a* più alto tra quelli rimasti
+    [~, diseaseCluster] = max(meanA);
+    
+    maskKMeans = (pixelLabels == diseaseCluster);
 
     ROI_kmeans = rgbImage;
     for ch = 1:3
