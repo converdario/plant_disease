@@ -1,5 +1,6 @@
 clear, clc
-%warning('off', 'all');
+warning('off', 'images:graycomatrix:scaledImageContainsNan');
+warning('off', 'stats:kmeans:FailedToConvergeRep');
 %tic
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
@@ -22,6 +23,7 @@ outputHist   = fullfile(folder, 'ROI_Histogram');
 if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
 if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 
+%for k = 1:100
 for k = 1:length(imageFiles)
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
@@ -36,7 +38,7 @@ for k = 1:length(imageFiles)
     ab = im2single(cat(3, a, b));
     pixelData = reshape(ab, [], 2);
     nColors = 3;
-    [cluster_idx, ~] = kmeans(pixelData, nColors, 'Distance', 'sqEuclidean', 'Replicates', 3);
+    [cluster_idx, ~] = kmeans(pixelData, nColors, 'MaxIter', 1000, 'Distance', 'sqEuclidean', 'Replicates', 3);
     pixelLabels = reshape(cluster_idx, size(rgbImage,1), size(rgbImage,2));
     
     % Trova cluster con L* più basso
@@ -73,7 +75,7 @@ for k = 1:length(imageFiles)
     imwrite(ROI_hist, fullfile(outputHist, ['H_', imageFiles(k).name]));
 
     %% Matrice GLCM
-    I_gray_original = double(rgb2gray(rgbImage)); %trasformazione dell'immagine originale in scala di grigi e conversione in double (per supportare i valori NaN)
+    I_gray_original = double(rgb2gray(rgbImage)) / 255; %trasformazione dell'immagine originale in scala di grigi e conversione in double (per supportare i valori NaN)
     
     I_gray_masked_kmeans = I_gray_original; 
     I_gray_masked_kmeans(~maskKMeans) = NaN; % Imposta a NaN i pixel di sfondo (neri, ma che non fanno parte della ROI)
