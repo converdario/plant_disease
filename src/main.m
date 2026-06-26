@@ -10,11 +10,11 @@ num_images = length(imageFiles);
 allExtractedFeatures = table(...
     'Size', [0, 11], ... % 0 righe inizialmente, 13 colonne (3 info + 5 KMeans + 5 Hist)
     'VariableTypes', {'string', ... % ImageName
-    'double', 'double', 'double', 'double', 'double', ... % KMeans_Energy, ..., Entropy
-    'double', 'double', 'double', 'double', 'double'}, ... % Hist_Energy, ..., Entropy
+                      'double', 'double', 'double', 'double', 'double', ... % KMeans_Energy, ..., Entropy
+                      'double', 'double', 'double', 'double', 'double'}, ... % Hist_Energy, ..., Entropy
     'VariableNames', {'ImageName', ...
-    'KMeans_Energy', 'KMeans_Contrast', 'KMeans_Correlation', 'KMeans_Homogeneity', 'KMeans_Entropy', ...
-    'Hist_Energy', 'Hist_Contrast', 'Hist_Correlation', 'Hist_Homogeneity', 'Hist_Entropy'}); %tabella che conterrà i risultati in output
+                     'KMeans_Energy', 'KMeans_Contrast', 'KMeans_Correlation', 'KMeans_Homogeneity', 'KMeans_Entropy', ...
+                     'Hist_Energy', 'Hist_Contrast', 'Hist_Correlation', 'Hist_Homogeneity', 'Hist_Entropy'}); %tabella che conterrà i risultati in output 
 
 outputKMeans = fullfile(folder, 'ROI_KMeans');
 outputHist   = fullfile(folder, 'ROI_Histogram');
@@ -32,7 +32,9 @@ for k = 1:5
     a = labImage(:,:,2);
     b = labImage(:,:,3);
     %% Rimozione sfondo
-    maskLeaf = removeBackground(rgbImage);
+    %maskLeaf = removeBackground(rgbImage);
+    %maskLeaf = imbinarize(rgb2gray(rgbImage), graythresh(rgb2gray(rgbImage)));
+    maskLeaf = removeBackgroundSuperpixel(rgbImage);
 
     %% KMeans sulla sola foglia
 
@@ -43,10 +45,10 @@ for k = 1:5
     leafPixels = pixelDataAll(maskLeaf(:),:);
     nColors = 4;
 
-    if size(leafPixels,1) < nColors
-        fprintf("Immagine %s: foglia non trovata, salto.\n", imageFiles(k).name);
-        continue;
-    end
+if size(leafPixels,1) < nColors
+    fprintf("Immagine %s: foglia non trovata, salto.\n", imageFiles(k).name);
+    continue;
+end
 
     opts = statset('MaxIter',500);
 
@@ -212,20 +214,20 @@ for k = 1:5
     mean_homogeneity_hist = mean([props_hist.Homogeneity]);
     mean_entropy_hist = mean(entropy_hist);
 
-    newRow = {imageFiles(k).name, ...
-        mean_energy_kmeans, ...
-        mean_contrast_kmeans, ...
-        mean_correlation_kmeans, ...
-        mean_homogeneity_kmeans, ...
-        mean_entropy_kmeans, ...
-        mean_energy_hist, ...
-        mean_contrast_hist, ...
-        mean_correlation_hist, ...
-        mean_homogeneity_hist, ...
-        mean_entropy_hist};
-
+    newRow = {imageFiles(k).name, ... 
+              mean_energy_kmeans, ...
+              mean_contrast_kmeans, ...
+              mean_correlation_kmeans, ...
+              mean_homogeneity_kmeans, ...
+              mean_entropy_kmeans, ...
+              mean_energy_hist, ...
+              mean_contrast_hist, ...
+              mean_correlation_hist, ...
+              mean_homogeneity_hist, ...
+              mean_entropy_hist};
+            
     allExtractedFeatures = [allExtractedFeatures; newRow]; % aggiunta alla tabella della riga con le feature calcolate
-
+    
 
     fprintf('Elaborata immagine %d/%d: %s\n', k, num_images, imageFiles(k).name);
     fprintf('  K-Means ROI: Energy=%.4f, Contrast=%.4f, Correlation=%.4f, Homogeneity=%.4f, Entropy=%.4f\n', ...
@@ -287,5 +289,52 @@ end
 % Chiusura morfologica
 se = strel('disk',10);
 maskLeaf = imclose(maskLeaf,se);
+
+end
+
+function maskLeaf = removeBackgroundSuperpixel(rgbImage)
+
+% Numero di superpixel (più alto = più preciso ma più lento)
+numSuperpixels = 300;
+
+% Segmentazione superpixel
+[L,N] = superpixels(rgbImage, numSuperpixels);
+
+% Feature per ogni superpixel
+lab = rgb2lab(rgbImage);
+Lch = lab(:,:,1);
+Ach = lab(:,:,2);
+Bch = lab(:,:,3);
+
+meanL = zeros(N,1);
+meanS = zeros(N,1);
+
+hsv = rgb2hsv(rgbImage);
+S = hsv(:,:,2);
+
+% Calcolo feature per ogni superpixel
+for i = 1:N
+    mask = (L == i);
+
+    meanL(i) = mean(Lch(mask));
+    meanS(i) = mean(S(mask));
+end
+
+% 🔍 Regola di selezione:
+% foglia = più verde + più texture (semplice euristica)
+score = meanS .* (1 - mat2gray(meanL));
+
+% soglia automatica
+t = graythresh(score);
+
+selectedLabels = find(score > t);
+
+% costruzione maschera finale
+maskLeaf = ismember(L, selectedLabels);
+
+% pulizia morfologica
+maskLeaf = imfill(maskLeaf,'holes');
+maskLeaf = bwareaopen(maskLeaf, 500);
+maskLeaf = imclose(maskLeaf, strel('disk',10));
 
 end
