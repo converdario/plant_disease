@@ -4,7 +4,7 @@ warning('off', 'stats:kmeans:FailedToConvergeRep');
 %tic
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'Olive_leaf', 'train', 'olive_peacock_spot');
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'healthy');
 imageFiles = dir(fullfile(folder, '*.jpg'));
 num_images = length(imageFiles);
 allExtractedFeatures = table(...
@@ -22,8 +22,8 @@ outputHist   = fullfile(folder, 'ROI_Histogram');
 if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
 if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 
-%for k = 1:length(imageFiles)
-for k = 1:5
+for k = 1:length(imageFiles)
+%for k = 1:5
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
 
@@ -245,8 +245,9 @@ end
     %     close all;
 end
 
-save('all_extracted_texture_features.mat', 'allExtractedFeatures');
-fprintf('\nTutte le feature sono state estratte e salvate in all_extracted_texture_features.mat\n');
+outputFilePath = fullfile(folder, 'all_extracted_texture_features.mat');
+save(outputFilePath, 'allExtractedFeatures');
+fprintf('\nTutte le feature sono state estratte e salvate in:\n%s\n', outputFilePath);
 
 %tempo_trascorso = toc;
 %tempo_trascorso = datestr(tempo_trascorso/(24*3600), 'HH:MM:SS');
