@@ -55,43 +55,32 @@ for k = 1:num_images
     a = labImage(:,:,2);
     b = labImage(:,:,3);
 
-    %% --- RIMOZIONE SFONDO (Metodo Custom) ---
-    % Usiamo la tua procedura avanzata per isolare la foglia
+    %% --- RIMOZIONE SFONDO ---
     maskLeaf = removeBackgroundSuperpixel(rgbImage);
 
-    %% --- SEGMENTAZIONE K-MEANS SULLA FOGLIA ---
-    ab = im2single(cat(3,a,b));
-    pixelDataAll = reshape(ab, [], 2);
+    %% --- SEGMENTAZIONE K-MEANS SULLA FOGLIA (Ottimizzata) ---
+    ab = im2single(cat(3, a, b));
     
-    % Estraiamo solo i pixel validi (appartenenti alla foglia)
-    leafPixels = pixelDataAll(maskLeaf(:), :);
+    % Applichiamo la maschera per azzerare lo sfondo sui canali a* e b*
+    ab(:, :, 1) = ab(:, :, 1) .* maskLeaf;
+    ab(:, :, 2) = ab(:, :, 2) .* maskLeaf;
     
-    % Controllo di sicurezza se l'immagine è vuota o la maschera ha fallito
-    if size(leafPixels,1) < NUM_CLUSTERS
-        fprintf("Immagine %s: foglia non trovata o troppo piccola, salto.\n", imageFiles(k).name);
-        continue;
-    end
-
-    opts = statset('MaxIter',500);
-    [cluster_idx, ~] = kmeans(leafPixels, NUM_CLUSTERS, 'Distance', 'sqEuclidean', 'Replicates', 3, 'Options', opts);
+    % Segmentazione K-Means diretta sull'immagine
+    % 'centers' è una matrice 3x2 contenente i baricentri [a*, b*] dei cluster
+    [pixelLabels, centers] = imsegkmeans(ab, NUM_CLUSTERS);
     
-    pixelLabels = zeros(size(maskLeaf));
-    pixelLabels(maskLeaf) = cluster_idx;
+    % 1. Individuiamo quale dei 3 cluster è stato assegnato allo sfondo
+    % (È il valore più frequente al di fuori della maschera della foglia)
+    bgCluster = mode(pixelLabels(~maskLeaf));
     
-    % Trova il cluster della malattia valutando il canale a* (solo dove c'è la foglia)
-    meanA = zeros(NUM_CLUSTERS, 1);
-    for i = 1:NUM_CLUSTERS
-        currentMask = (pixelLabels == i);
-        if any(currentMask(:))
-            meanA(i) = mean(a(currentMask)); 
-        else
-            meanA(i) = -Inf;
-        end
-    end
+    % 2. Escludiamo lo sfondo dalla ricerca impostando il suo centro a -Inf
+    centers(bgCluster, 1) = -Inf; 
     
-    % Il cluster con valore a* più alto è la lesione marrone/rossastra
-    [~, diseaseCluster] = max(meanA);
-    maskKMeans = (pixelLabels == diseaseCluster);
+    % 3. La malattia è il cluster con il baricentro a* (prima colonna) più alto
+    [~, diseaseCluster] = max(centers(:, 1));
+    
+    % Generazione maschera finale
+    maskKMeans = (pixelLabels == diseaseCluster) & maskLeaf;
 
     % Calcolo della percentuale di infezione
     leaf_pixels = sum(maskLeaf(:));
