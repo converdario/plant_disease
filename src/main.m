@@ -19,7 +19,7 @@ GLCM_NUM_LEVELS = 128;
 %% =========================================================================
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'aculus_olearius'); % Directory dove prelevare le immagini
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'peacock_spot'); % Directory dove prelevare le immagini
 
 imageFiles = dir(fullfile(folder, '*.jpg'));
 if isempty(imageFiles)
@@ -51,7 +51,7 @@ if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 %% CICLO PRINCIPALE ELABORAZIONE IMMAGINI
 %% =========================================================================
 
-for k = 1:10
+for k = 1:num_images
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
 
@@ -86,12 +86,21 @@ for k = 1:10
     % 'centers' è una matrice 3x2 contenente i baricentri [a*, b*] dei cluster
     [pixelLabels, centers] = imsegkmeans(ab, NUM_CLUSTERS);
     
-    % 1. Individuiamo quale dei 3 cluster è stato assegnato allo sfondo
-    % (È il valore più frequente al di fuori della maschera della foglia)
-    bgCluster = mode(pixelLabels(~maskLeaf));
+    % 1. Estraiamo le etichette dei pixel di sfondo
+    bgPixels = pixelLabels(~maskLeaf);
     
-    % 2. Escludiamo lo sfondo dalla ricerca impostando il suo centro a -Inf
-    centers(bgCluster, 1) = -Inf; 
+    % Controlliamo se esiste effettivamente uno sfondo in questa immagine
+    if ~isempty(bgPixels)
+        % Individuiamo il cluster dello sfondo
+        bgCluster = mode(bgPixels);
+        
+        % 2. Escludiamo lo sfondo dalla ricerca impostando il suo centro a -Inf
+        centers(bgCluster, 1) = -Inf; 
+    else
+        % Se l'immagine non ha sfondo (intera immagine = foglia), 
+        % non escludiamo alcun cluster e stampiamo un piccolo avviso.
+        warning('Nessuno sfondo rilevato per l''immagine %s. Elaborazione come singola foglia.', imageFiles(k).name);
+    end
     
     % 3. La malattia è il cluster con il baricentro a* (prima colonna) più alto
     [~, diseaseCluster] = max(centers(:, 1));
@@ -222,27 +231,47 @@ outputFilePath = fullfile(folder, 'all_extracted_texture_features.mat');
 save(outputFilePath, 'allExtractedFeatures');
 fprintf('\nTutte le feature sono state estratte e salvate in:\n%s\n', outputFilePath);
 
-% Rimuove le righe con NaN per garantire che corrcoef funzioni correttamente
-validRows = ~isnan(allExtractedFeatures.KMeans_Energy) & ~isnan(allExtractedFeatures.Infection_Percentage);
+% Rimuove le righe dove la percentuale di infezione è NaN
+validRows = ~isnan(allExtractedFeatures.Infection_Percentage);
 validFeatures = allExtractedFeatures(validRows, :);
 
 if height(validFeatures) > 1
+    % Isoliamo il target
     inf_perc = validFeatures.Infection_Percentage;
-    energy_k = validFeatures.KMeans_Energy;
-    entropy_k = validFeatures.KMeans_Entropy;
+    
+    fprintf('\n====================================================================================\n');
+    fprintf('ANALISI DESCRITTIVA DELLE FEATURE E CORRELAZIONE CON IL TARGET\n');
+    fprintf('====================================================================================\n');
+    
+    % Estraiamo tutti i nomi delle colonne
+    allVarNames = validFeatures.Properties.VariableNames;
+    
+    % Escludiamo 'ImageName' e il target 'Infection_Percentage' dal ciclo
+    featuresToProcess = setdiff(allVarNames, {'ImageName', 'Infection_Percentage'}, 'stable');
 
-    R_energy = corrcoef(energy_k, inf_perc);
-    r_energy = R_energy(1,2);
-
-    R_entropy = corrcoef(entropy_k, inf_perc);
-    r_entropy = R_entropy(1,2);
-
-    fprintf('\n==================================================\n');
-    fprintf('RISULTATI DI CORRELAZIONE\n');
-    fprintf('==================================================\n');
-    fprintf('Energia  : r = %7.4f\n', r_energy);
-    fprintf('Entropia : r = %7.4f\n', r_entropy);
-    fprintf('==================================================\n');
+    for i = 1:length(featuresToProcess)
+        featureName = featuresToProcess{i};
+        featureData = validFeatures.(featureName);
+        
+        % Calcolo della Media della feature
+        mean_val = mean(featureData, 'omitnan');
+        
+        % Filtro validità per allineare gli array nel calcolo di Pearson
+        validIdx = ~isnan(featureData) & ~isnan(inf_perc);
+        
+        if sum(validIdx) > 1
+            % Calcolo matrice di correlazione tra feature corrente e target
+            R_matrix = corrcoef(featureData(validIdx), inf_perc(validIdx));
+            r_val = R_matrix(1,2);
+        else
+            r_val = NaN;
+        end
+        
+        % Stampa dei risultati formattata
+        fprintf('%-22s : Media = %10.4f | r (vs %% Inf) = %7.4f\n', ...
+                featureName, mean_val, r_val);
+    end
+    fprintf('====================================================================================\n');
 else
     disp('Non ci sono abbastanza immagini valide per calcolare la correlazione.');
 end

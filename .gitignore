@@ -5,3 +5,6 @@
 /public/dataset/healthy/ROI_Histogram
 /public/dataset/healthy/ROI_KMeans
 *.mat
+/public/dataset/aculus_olearius/NoBackground
+/public/dataset/healthy/NoBackground
+/public/dataset/peacock_spot/NoBackground
