@@ -38,6 +38,11 @@ allExtractedFeatures = table(...
 
 outputKMeans = fullfile(folder, 'ROI_KMeans');
 outputHist   = fullfile(folder, 'ROI_Histogram');
+outputNoBackground = fullfile(folder, 'NoBackground');
+
+if ~exist(outputNoBackground, 'dir')
+    mkdir(outputNoBackground);
+end
 
 if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
 if ~exist(outputHist, 'dir'), mkdir(outputHist); end
@@ -46,7 +51,7 @@ if ~exist(outputHist, 'dir'), mkdir(outputHist); end
 %% CICLO PRINCIPALE ELABORAZIONE IMMAGINI
 %% =========================================================================
 
-for k = 1:num_images
+for k = 1:10
     filename = fullfile(folder, imageFiles(k).name);
     rgbImage = imread(filename);
 
@@ -57,6 +62,18 @@ for k = 1:num_images
 
     %% --- RIMOZIONE SFONDO ---
     maskLeaf = removeBackgroundSuperpixel(rgbImage);
+
+    %% --- SALVATAGGIO IMMAGINE SENZA SFONDO ---
+    rgbNoBackground = rgbImage;
+    
+    for ch = 1:3
+        temp = rgbNoBackground(:,:,ch);
+        temp(~maskLeaf) = 0;          % imposta lo sfondo a nero
+        rgbNoBackground(:,:,ch) = temp;
+    end
+    
+    imwrite(rgbNoBackground, ...
+        fullfile(outputNoBackground, ['NB_', imageFiles(k).name]));
 
     %% --- SEGMENTAZIONE K-MEANS SULLA FOGLIA (Ottimizzata) ---
     ab = im2single(cat(3, a, b));
@@ -234,31 +251,171 @@ end
 %% FUNZIONI AUSILIARIE (Rimozione Sfondo)
 %% =========================================================================
 
-function maskLeaf = removeBackground(rgbImage)
-    hsvImage = rgb2hsv(rgbImage);
-    S = hsvImage(:,:,2);
-    
-    maskLeaf = S > graythresh(S);
-    maskLeaf = imfill(maskLeaf,'holes');
-    maskLeaf = bwareaopen(maskLeaf,1000);
-    maskLeaf = imclose(maskLeaf,strel('disk',15));
-    maskLeaf = imfill(maskLeaf,'holes');
-    maskLeaf = bwareaopen(maskLeaf,500);
-    
-    CC = bwconncomp(maskLeaf);
-    if CC.NumObjects > 0
-        numPixels = cellfun(@numel, CC.PixelIdxList);
-        [~, idx] = max(numPixels);
-        maskLeaf = false(size(maskLeaf));
-        maskLeaf(CC.PixelIdxList{idx}) = true;
-    end
-    
-    se = strel('disk',10);
-    maskLeaf = imclose(maskLeaf,se);
+function maskLeaf = removeBackgroundSuperpixel(rgbImage)
+
+%% =====================================================
+% 1) Segmentazione iniziale HSV
+% ======================================================
+
+hsvImage = rgb2hsv(rgbImage);
+
+S = hsvImage(:,:,2);
+V = hsvImage(:,:,3);
+
+
+% Maschera basata sulla saturazione
+thresholdS = graythresh(S);
+
+maskLeaf = S > thresholdS;
+
+
+% Elimina zone quasi bianche (spesso riflessi o sfondo chiaro)
+maskLeaf = maskLeaf & (V < 0.97);
+
+
+
+%% =====================================================
+% 2) Pulizia iniziale
+% ======================================================
+
+maskLeaf = imfill(maskLeaf,'holes');
+
+maskLeaf = bwareaopen(maskLeaf,1000);
+
+maskLeaf = imclose(maskLeaf,strel('disk',10));
+
+maskLeaf = imfill(maskLeaf,'holes');
+
+
+
+%% =====================================================
+% 3) Mantiene solo la foglia principale
+% ======================================================
+
+CC = bwconncomp(maskLeaf);
+
+
+if CC.NumObjects > 0
+
+    areas = cellfun(@numel,CC.PixelIdxList);
+
+    [~,idx] = max(areas);
+
+    tempMask = false(size(maskLeaf));
+
+    tempMask(CC.PixelIdxList{idx}) = true;
+
+    maskLeaf = tempMask;
+
 end
 
-function maskLeaf = removeBackgroundSuperpixel(rgbImage)
-    numSuperpixels = 300;
+
+
+%% =====================================================
+% 4) Raffinamento colore LAB
+% ======================================================
+
+labImage = rgb2lab(rgbImage);
+
+
+L = labImage(:,:,1);
+A = labImage(:,:,2);
+B = labImage(:,:,3);
+
+
+
+% Colore medio della foglia individuata
+
+leafPixels = find(maskLeaf);
+
+
+meanLeafColor = [
+    mean(L(leafPixels))
+    mean(A(leafPixels))
+    mean(B(leafPixels))
+    ];
+
+
+
+% distanza LAB di ogni pixel dal colore della foglia
+
+colorDistance = sqrt( ...
+    (L-meanLeafColor(1)).^2 + ...
+    (A-meanLeafColor(2)).^2 + ...
+    (B-meanLeafColor(3)).^2 );
+
+
+
+% soglia adattiva:
+% prende il 95% dei pixel della foglia trovata
+
+leafDistance = colorDistance(maskLeaf);
+
+thresholdLAB = prctile(leafDistance,85);
+
+
+
+% mantiene solo pixel compatibili con la foglia
+
+refinedMask = colorDistance < thresholdLAB;
+
+
+
+%% =====================================================
+% 5) Vincolo spaziale
+%    evita che ritorni lo sfondo lontano
+% ======================================================
+
+% permette una piccola espansione del bordo
+
+allowedRegion = imdilate(maskLeaf,strel('disk',15));
+
+
+refinedMask = refinedMask & allowedRegion;
+
+
+
+%% =====================================================
+% 6) Pulizia finale
+% ======================================================
+
+maskLeaf = refinedMask;
+
+
+maskLeaf = imfill(maskLeaf,'holes');
+
+
+maskLeaf = bwareaopen(maskLeaf,500);
+
+
+maskLeaf = imclose(maskLeaf,strel('disk',8));
+
+
+%% =====================================================
+% 7) Ultimo controllo componente maggiore
+% ======================================================
+
+CC = bwconncomp(maskLeaf);
+
+
+if CC.NumObjects > 1
+
+    areas = cellfun(@numel,CC.PixelIdxList);
+
+    [~,idx] = max(areas);
+
+    finalMask=false(size(maskLeaf));
+
+    finalMask(CC.PixelIdxList{idx})=true;
+
+    maskLeaf=finalMask;
+
+end
+
+
+end
+function maskLeaf = removeBackgroundSuperpixelOld(rgbImage)
+    numSuperpixels = 5000;
     [L,N] = superpixels(rgbImage, numSuperpixels);
     
     lab = rgb2lab(rgbImage);
