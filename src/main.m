@@ -27,14 +27,31 @@ if isempty(imageFiles)
 end
 num_images = length(imageFiles);
 
-allExtractedFeatures = table(...
-    'Size', [0, 12], ...
-    'VariableTypes', {'string', 'double', ...
-                      'double', 'double', 'double', 'double', 'double', ...
-                      'double', 'double', 'double', 'double', 'double'}, ...
-    'VariableNames', {'ImageName', 'Infection_Percentage', ...
-                     'KMeans_Energy', 'KMeans_Contrast', 'KMeans_Correlation', 'KMeans_Homogeneity', 'KMeans_Entropy', ...
-                     'Hist_Energy', 'Hist_Contrast', 'Hist_Correlation', 'Hist_Homogeneity', 'Hist_Entropy'});
+varNames = {...
+'ImageName', ...
+'Infection_Percentage', ...
+'KMeans_Energy', ...
+'KMeans_Contrast', ...
+'KMeans_Correlation', ...
+'KMeans_Homogeneity', ...
+'KMeans_Entropy', ...
+'Hist_Energy', ...
+'Hist_Contrast', ...
+'Hist_Correlation', ...
+'Hist_Homogeneity', ...
+'Hist_Entropy'};
+
+varTypes = [{'string'}, repmat({'double'},1,length(varNames)-1)];
+
+allExtractedFeatures = table( ...
+    'Size',[0,length(varNames)], ...
+    'VariableTypes',varTypes,...
+    'VariableNames',varNames);
+
+imageFeatures = table( ...
+    'Size',[0,length(varNames)], ...
+    'VariableTypes',varTypes,...
+    'VariableNames',varNames);
 
 outputKMeans = fullfile(folder, 'ROI_KMeans');
 outputHist   = fullfile(folder, 'ROI_Histogram');
@@ -76,34 +93,56 @@ for k = 1:num_images
         fullfile(outputNoBackground, ['NB_', imageFiles(k).name]));
 
     %% --- SEGMENTAZIONE K-MEANS SULLA FOGLIA (Ottimizzata) ---
-    ab = im2single(cat(3, a, b));
+   abImage = im2single(cat(3,a,b));
+
+    pixelsAB = reshape(abImage,[],2);
     
-    % Applichiamo la maschera per azzerare lo sfondo sui canali a* e b*
-    ab(:, :, 1) = ab(:, :, 1) .* maskLeaf;
-    ab(:, :, 2) = ab(:, :, 2) .* maskLeaf;
+    leafPixels = find(maskLeaf);
     
-    % Segmentazione K-Means diretta sull'immagine
-    % 'centers' è una matrice 3x2 contenente i baricentri [a*, b*] dei cluster
-    [pixelLabels, centers] = imsegkmeans(ab, NUM_CLUSTERS);
+    dataLeaf = pixelsAB(leafPixels,:);
     
-    % 1. Estraiamo le etichette dei pixel di sfondo
-    bgPixels = pixelLabels(~maskLeaf);
     
-    % Controlliamo se esiste effettivamente uno sfondo in questa immagine
-    if ~isempty(bgPixels)
-        % Individuiamo il cluster dello sfondo
-        bgCluster = mode(bgPixels);
-        
-        % 2. Escludiamo lo sfondo dalla ricerca impostando il suo centro a -Inf
-        centers(bgCluster, 1) = -Inf; 
-    else
-        % Se l'immagine non ha sfondo (intera immagine = foglia), 
-        % non escludiamo alcun cluster e stampiamo un piccolo avviso.
-        warning('Nessuno sfondo rilevato per l''immagine %s. Elaborazione come singola foglia.', imageFiles(k).name);
-    end
+    [idx,centers] = kmeans(...
+        dataLeaf,...
+        NUM_CLUSTERS,...
+        'Replicates',5);
     
-    % 3. La malattia è il cluster con il baricentro a* (prima colonna) più alto
-    [~, diseaseCluster] = max(centers(:, 1));
+    
+    pixelLabels=zeros(size(maskLeaf));
+    
+    pixelLabels(leafPixels)=idx;
+    
+    %% Colore medio della foglia
+
+    abPixels = reshape(abImage,[],2);
+    
+    leafPixels = find(maskLeaf);
+    
+    meanLeafAB = mean(abPixels(leafPixels,:),1);
+    
+    
+    %% Distanza dei cluster dal colore medio foglia
+    
+    distanceFromLeaf = sqrt( ...
+        (centers(:,1)-meanLeafAB(1)).^2 + ...
+        (centers(:,2)-meanLeafAB(2)).^2 );
+    
+    
+    %% Il cluster più distante rappresenta la macchia
+    
+    [~,diseaseCluster] = max(distanceFromLeaf);
+
+
+    %% Maschera malattia
+    
+    maskKMeans = false(size(maskLeaf));
+    
+    maskKMeans(leafPixels)=idx==diseaseCluster;
+    
+    
+    %% Il cluster più diverso è la macchia
+    
+    [~, diseaseCluster] = max(distanceFromLeaf);
     
     % Generazione maschera finale
     maskKMeans = (pixelLabels == diseaseCluster) & maskLeaf;
@@ -118,20 +157,40 @@ for k = 1:num_images
         infection_percentage = 0;
     end
 
-    % Salvataggio ROI K-Means
+    %% Salvataggio ROI KMeans
+
     ROI_kmeans = rgbImage;
-    for ch = 1:3
-        temp_img = ROI_kmeans(:,:,ch);
-        temp_img(~maskKMeans) = 0;
-        ROI_kmeans(:,:,ch) = temp_img;
+    
+    for ch=1:3
+        
+        temp = ROI_kmeans(:,:,ch);
+        
+        temp(~maskKMeans)=0;
+        
+        ROI_kmeans(:,:,ch)=temp;
+    
     end
-    imwrite(ROI_kmeans, fullfile(outputKMeans, ['K_', imageFiles(k).name]));
+    
+    
+    imwrite(ROI_kmeans,...
+    fullfile(outputKMeans,...
+    ['K_',imageFiles(k).name]));
+
+    
+
+
 
     %% --- THRESHOLDING SU CANALE a* (Metodo di confronto) ---
     aChannel = mat2gray(a);
     level = graythresh(aChannel);
-    maskHist = imbinarize(aChannel, level);
-    maskHist = maskHist & maskLeaf; 
+    maskHist = imbinarize(aChannel,level);
+
+    % scelgo la polarità con meno pixel
+    if sum(maskHist(:)) > 0.5*sum(maskLeaf(:))
+        maskHist = ~maskHist;
+    end
+    
+    maskHist = maskHist & maskLeaf;
     
     ROI_hist = rgbImage;
     for ch = 1:3
@@ -144,91 +203,132 @@ for k = 1:num_images
     %% --- MATRICE GLCM ED ESTRAZIONE FEATURE ---
     I_gray_original = uint8(rgb2gray(rgbImage));
 
-    % === ROI KMEANS ===
-    statsK = regionprops(maskKMeans,'Area','BoundingBox');
-    if isempty(statsK)
-        mean_energy_kmeans = NaN; mean_contrast_kmeans = NaN;
-        mean_correlation_kmeans = NaN; mean_homogeneity_kmeans = NaN; mean_entropy_kmeans = NaN;
-    else
-        [~,idxK] = max([statsK.Area]);
-        bboxK = round(statsK(idxK).BoundingBox);
-        roiGrayK = imcrop(I_gray_original,bboxK);
-        roiMaskK = imcrop(maskKMeans,bboxK);
-        roiGrayK(~roiMaskK) = 0;
+    I_gray_noBackground = I_gray_original;
 
-        glcm_kmeans = graycomatrix(roiGrayK, 'Offset', GLCM_OFFSETS, 'NumLevels', GLCM_NUM_LEVELS, 'Symmetric', GLCM_SYMMETRIC);
-        
-        props_kmeans = graycoprops(glcm_kmeans);
-        entropy_kmeans = zeros(1, size(glcm_kmeans, 3));
-        for i = 1:size(glcm_kmeans, 3)
-            temp_glcm = glcm_kmeans(:,:,i);
-            temp_glcm_norm = temp_glcm / sum(temp_glcm(:));
-            non_zero_elements = temp_glcm_norm(temp_glcm_norm>0);
-            entropy_kmeans(i) = -sum(non_zero_elements .* log(non_zero_elements));
-        end
-        
-        mean_energy_kmeans = mean([props_kmeans.Energy]);
-        mean_contrast_kmeans = mean([props_kmeans.Contrast]);
-        mean_correlation_kmeans = mean([props_kmeans.Correlation]);
-        mean_homogeneity_kmeans = mean([props_kmeans.Homogeneity]);
-        mean_entropy_kmeans = mean(entropy_kmeans);
-    end
+    I_gray_noBackground(~maskLeaf)=0;
+
+    %% === ROI KMEANS ===
+
+    featuresK = computeROITextureFeatures( ...
+        I_gray_original,...
+        maskKMeans,...
+        GLCM_OFFSETS,...
+        GLCM_NUM_LEVELS,...
+        GLCM_SYMMETRIC);
+
 
     % === ROI HISTOGRAM ===
-    statsH = regionprops(maskHist,'Area','BoundingBox');
-    if isempty(statsH)
-        mean_energy_hist = NaN; mean_contrast_hist = NaN;
-        mean_correlation_hist = NaN; mean_homogeneity_hist = NaN; mean_entropy_hist = NaN;
-    else
-        [~,idxH] = max([statsH.Area]);
-        bboxH = round(statsH(idxH).BoundingBox);
-        roiGrayH = imcrop(I_gray_original,bboxH);
-        roiMaskH = imcrop(maskHist,bboxH);
-        roiGrayH(~roiMaskH) = 0;
+    featuresH = computeROITextureFeatures(...
+        I_gray_original,...
+        maskHist,...
+        GLCM_OFFSETS,...
+        GLCM_NUM_LEVELS,...
+        GLCM_SYMMETRIC);
 
-        glcm_hist = graycomatrix(roiGrayH, 'Offset', GLCM_OFFSETS, 'NumLevels', GLCM_NUM_LEVELS, 'Symmetric', GLCM_SYMMETRIC);
-        
-        props_hist = graycoprops(glcm_hist);
-        entropy_hist = zeros(1, size(glcm_hist, 3));
-        for i = 1:size(glcm_hist, 3)
-            temp_glcm = glcm_hist(:,:,i);
-            temp_glcm_norm = temp_glcm / sum(temp_glcm(:));
-            non_zero_elements = temp_glcm_norm(temp_glcm_norm>0);
-            entropy_hist(i) = -sum(non_zero_elements .* log(non_zero_elements));
-        end
 
-        mean_energy_hist = mean([props_hist.Energy]);
-        mean_contrast_hist = mean([props_hist.Contrast]);
-        mean_correlation_hist = mean([props_hist.Correlation]);
-        mean_homogeneity_hist = mean([props_hist.Homogeneity]);
-        mean_entropy_hist = mean(entropy_hist);
-    end
+values = double([ ...
+infection_percentage,...
+featuresK.Energy,...
+featuresK.Contrast,...
+featuresK.Correlation,...
+featuresK.Homogeneity,...
+featuresK.Entropy,...
+featuresH.Energy,...
+featuresH.Contrast,...
+featuresH.Correlation,...
+featuresH.Homogeneity,...
+featuresH.Entropy
+]);
 
-    % Salvataggio riga corrente
-    newRow = {imageFiles(k).name, ... 
-              infection_percentage, ...
-              mean_energy_kmeans, ...
-              mean_contrast_kmeans, ...
-              mean_correlation_kmeans, ...
-              mean_homogeneity_kmeans, ...
-              mean_entropy_kmeans, ...
-              mean_energy_hist, ...
-              mean_contrast_hist, ...
-              mean_correlation_hist, ...
-              mean_homogeneity_hist, ...
-              mean_entropy_hist};
-            
-    allExtractedFeatures = [allExtractedFeatures; newRow];
+
+newRow = array2table(values,...
+    'VariableNames',varNames(2:end));
+
+
+newRow = addvars(newRow,...
+    string(imageFiles(k).name),...
+    'Before',1,...
+    'NewVariableNames','ImageName');
+
+
+allExtractedFeatures = [allExtractedFeatures; newRow];  
+imageFeatures = [imageFeatures; newRow];
     
     fprintf('Elaborata immagine %d/%d: %s (Area infetta: %.2f%%)\n', k, num_images, imageFiles(k).name, infection_percentage);
 end
+
+fprintf('\n==============================================================\n');
+fprintf('FEATURE PER SINGOLA IMMAGINE\n');
+fprintf('==============================================================\n');
+
+
+for i = 1:height(imageFeatures)
+
+    fprintf('\nImmagine: %s\n', imageFeatures.ImageName(i));
+
+    fprintf('Infezione: %.2f %%\n',...
+        imageFeatures.Infection_Percentage(i));
+
+
+    %% ============================
+    % KMEANS ROI
+    % ============================
+
+    fprintf('\n--- KMeans ROI ---\n');
+
+
+    fprintf('Energy       %.4f\n',...
+        imageFeatures.KMeans_Energy(i));
+
+    fprintf('Contrast     %.4f\n',...
+        imageFeatures.KMeans_Contrast(i));
+
+    fprintf('Correlation  %.4f\n',...
+        imageFeatures.KMeans_Correlation(i));
+
+    fprintf('Homogeneity  %.4f\n',...
+        imageFeatures.KMeans_Homogeneity(i));
+
+    fprintf('Entropy      %.4f\n',...
+        imageFeatures.KMeans_Entropy(i));
+
+
+
+    %% ============================
+    % HISTOGRAM ROI
+    % ============================
+
+    fprintf('\n--- Histogram ROI ---\n');
+
+
+    fprintf('Energy       %.4f\n',...
+        imageFeatures.Hist_Energy(i));
+
+    fprintf('Contrast     %.4f\n',...
+        imageFeatures.Hist_Contrast(i));
+
+    fprintf('Correlation  %.4f\n',...
+        imageFeatures.Hist_Correlation(i));
+
+    fprintf('Homogeneity  %.4f\n',...
+        imageFeatures.Hist_Homogeneity(i));
+
+    fprintf('Entropy      %.4f\n',...
+        imageFeatures.Hist_Entropy(i));
+
+end
+
+fprintf('\n==============================================================\n');
 
 %% =========================================================================
 %% SALVATAGGIO FINALE E CALCOLO CORRELAZIONE
 %% =========================================================================
 
 outputFilePath = fullfile(folder, 'all_extracted_texture_features.mat');
-save(outputFilePath, 'allExtractedFeatures');
+save(outputFilePath, ...
+    'allExtractedFeatures',...
+    'imageFeatures');
+
 fprintf('\nTutte le feature sono state estratte e salvate in:\n%s\n', outputFilePath);
 
 % Rimuove le righe dove la percentuale di infezione è NaN
@@ -443,31 +543,135 @@ end
 
 
 end
-function maskLeaf = removeBackgroundSuperpixelOld(rgbImage)
-    numSuperpixels = 5000;
-    [L,N] = superpixels(rgbImage, numSuperpixels);
-    
-    lab = rgb2lab(rgbImage);
-    Lch = lab(:,:,1);
-    
-    hsv = rgb2hsv(rgbImage);
-    S = hsv(:,:,2);
-    
-    meanL = zeros(N,1);
-    meanS = zeros(N,1);
-    
-    for i = 1:N
-        mask = (L == i);
-        meanL(i) = mean(Lch(mask));
-        meanS(i) = mean(S(mask));
+
+function features = extractGLCMFeatures(grayROI, offsets, numLevels, symmetric)
+
+%==========================================================================
+% Estrazione feature GLCM
+%
+% INPUT
+%   grayROI     : immagine grayscale
+%   offsets     : offset GLCM
+%   numLevels   : numero livelli GLCM
+%   symmetric   : true/false
+%
+% OUTPUT
+%   features.Energy
+%   features.Contrast
+%   features.Correlation
+%   features.Homogeneity
+%   features.Entropy
+%==========================================================================
+
+grayROI = im2uint8(mat2gray(grayROI));
+
+glcm = graycomatrix(grayROI,...
+    'Offset',offsets,...
+    'NumLevels',numLevels,...
+    'Symmetric',symmetric);
+
+props = graycoprops(glcm);
+
+entropyValues = zeros(1,size(glcm,3));
+
+for i=1:size(glcm,3)
+
+    P = glcm(:,:,i);
+
+    sumP = sum(P(:));
+
+if sumP > 0
+    P = P./sumP;
+else
+    entropyValues(i)=NaN;
+    continue
+end
+
+    P = P(P>0);
+
+    entropyValues(i) = -sum(P.*log(P));
+
+end
+
+features.Energy      = mean(props.Energy);
+features.Contrast    = mean(props.Contrast);
+features.Correlation = mean(props.Correlation);
+features.Homogeneity = mean(props.Homogeneity);
+features.Entropy     = mean(entropyValues);
+
+end
+
+function features = computeROITextureFeatures( ...
+                    grayImage,...
+                    roiMask,...
+                    offsets,...
+                    numLevels,...
+                    symmetric)
+
+%=====================================================================
+% Estrazione texture GLCM secondo approccio paper:
+%
+% Olive Spot Disease Detection and Classification using Analysis of
+% Leaf Image Textures
+%
+% Feature:
+%   - Energy
+%   - Contrast
+%   - Correlation
+%   - Homogeneity
+%   - Entropy
+%
+% La GLCM viene calcolata solamente sulla ROI segmentata.
+%=====================================================================
+
+
+features = struct();
+
+names = {'Energy',...
+         'Contrast',...
+         'Correlation',...
+         'Homogeneity',...
+         'Entropy'};
+
+
+if sum(roiMask(:))==0
+
+    for i=1:length(names)
+        features.(names{i}) = NaN;
     end
-    
-    score = meanS .* (1 - mat2gray(meanL));
-    t = graythresh(score);
-    selectedLabels = find(score > t);
-    
-    maskLeaf = ismember(L, selectedLabels);
-    maskLeaf = imfill(maskLeaf,'holes');
-    maskLeaf = bwareaopen(maskLeaf, 500);
-    maskLeaf = imclose(maskLeaf, strel('disk',10));
+
+    return
+
+end
+
+
+%% ROI malattia
+
+roi = grayImage;
+
+roi(~roiMask)=0;
+
+
+%% Bounding box automatica solo per ridurre dimensione
+
+stats = regionprops(roiMask,'BoundingBox');
+
+bbox = stats(1).BoundingBox;
+
+
+roi = imcrop(roi,bbox);
+mask = imcrop(roiMask,bbox);
+
+
+roi(~mask)=0;
+
+
+%% GLCM
+
+features = extractGLCMFeatures(...
+    roi,...
+    offsets,...
+    numLevels,...
+    symmetric);
+
 end
