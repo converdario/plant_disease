@@ -19,7 +19,7 @@ GLCM_NUM_LEVELS = 128;
 %% =========================================================================
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'aculus_olearius'); % Directory dove prelevare le immagini
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'peacock_spot'); % Directory dove prelevare le immagini
 
 imageFiles = dir(fullfile(folder, '*.jpg'));
 if isempty(imageFiles)
@@ -92,70 +92,365 @@ for k = 1:num_images
     imwrite(rgbNoBackground, ...
         fullfile(outputNoBackground, ['NB_', imageFiles(k).name]));
 
-    %% --- SEGMENTAZIONE K-MEANS SULLA FOGLIA (Ottimizzata) ---
-   abImage = im2single(cat(3,a,b));
-
-    pixelsAB = reshape(abImage,[],2);
-    
-    leafPixels = find(maskLeaf);
-    
-    dataLeaf = pixelsAB(leafPixels,:);
-    
-    
-    [idx,centers] = kmeans(...
-        dataLeaf,...
-        NUM_CLUSTERS,...
-        'Replicates',5);
-    
-    
-    pixelLabels=zeros(size(maskLeaf));
-    
-    pixelLabels(leafPixels)=idx;
-    
-    %% Colore medio della foglia
-
-    abPixels = reshape(abImage,[],2);
-    
-    leafPixels = find(maskLeaf);
-    
-    meanLeafAB = mean(abPixels(leafPixels,:),1);
-    
-    
-    %% Distanza dei cluster dal colore medio foglia
-    
-    distanceFromLeaf = sqrt( ...
-        (centers(:,1)-meanLeafAB(1)).^2 + ...
-        (centers(:,2)-meanLeafAB(2)).^2 );
-    
-    
-    %% Il cluster più distante rappresenta la macchia
-    
-    [~,diseaseCluster] = max(distanceFromLeaf);
+%% ============================================================
+%% SEGMENTAZIONE MALATTIA
+%% K-MEANS + LAB ANOMALY SCORE
+%% + THRESHOLDING LOCALE + MORFOLOGIA
+%% ============================================================
 
 
-    %% Maschera malattia
-    
-    maskKMeans = false(size(maskLeaf));
-    
-    maskKMeans(leafPixels)=idx==diseaseCluster;
-    
-    
-    %% Il cluster più diverso è la macchia
-    
-    [~, diseaseCluster] = max(distanceFromLeaf);
-    
-    % Generazione maschera finale
-    maskKMeans = (pixelLabels == diseaseCluster) & maskLeaf;
+%% ------------------------------------------------------------
+% 1) Conversione nello spazio LAB
+%% ------------------------------------------------------------
 
-    % Calcolo della percentuale di infezione
-    leaf_pixels = sum(maskLeaf(:));
-    disease_pixels = sum(maskKMeans(:));
-    
-    if leaf_pixels > 0
-        infection_percentage = (disease_pixels / leaf_pixels) * 100;
-    else
-        infection_percentage = 0;
+labImage = rgb2lab(rgbImage);
+
+L = labImage(:,:,1);
+a = labImage(:,:,2);
+b = labImage(:,:,3);
+
+
+%% ------------------------------------------------------------
+% 2) Estrazione dei soli pixel della foglia
+%% ------------------------------------------------------------
+
+leafPixels = find(maskLeaf);
+
+dataLab = [ ...
+    L(leafPixels), ...
+    a(leafPixels), ...
+    b(leafPixels)];
+
+
+%% ------------------------------------------------------------
+% 3) K-MEANS
+%% ------------------------------------------------------------
+
+[idx, centers] = kmeans( ...
+    dataLab, ...
+    NUM_CLUSTERS, ...
+    'Replicates', 10, ...
+    'MaxIter', 500, ...
+    'Start', 'plus');
+
+
+%% ------------------------------------------------------------
+% 4) Ricostruzione della mappa dei cluster
+%% ------------------------------------------------------------
+
+pixelLabels = zeros(size(maskLeaf));
+
+pixelLabels(leafPixels) = idx;
+
+
+%% ------------------------------------------------------------
+% 5) COLORE MEDIO DELLA FOGLIA
+%% ------------------------------------------------------------
+
+meanLeafL = mean(L(maskLeaf));
+meanLeafA = mean(a(maskLeaf));
+meanLeafB = mean(b(maskLeaf));
+
+
+stdLeafL = std(L(maskLeaf));
+stdLeafA = std(a(maskLeaf));
+stdLeafB = std(b(maskLeaf));
+
+
+%% ============================================================
+%% 6) ANALISI DEI CLUSTER
+%% ============================================================
+
+clusterScore = zeros(NUM_CLUSTERS,1);
+
+clusterColorDistance = zeros(NUM_CLUSTERS,1);
+
+clusterDarkness = zeros(NUM_CLUSTERS,1);
+
+clusterArea = zeros(NUM_CLUSTERS,1);
+
+
+for c = 1:NUM_CLUSTERS
+
+    clusterMask = ...
+        (pixelLabels == c) & maskLeaf;
+
+
+    if sum(clusterMask(:)) == 0
+
+        clusterScore(c) = -Inf;
+
+        continue
+
     end
+
+
+    % Colore medio del cluster
+    clusterMeanL = mean(L(clusterMask));
+    clusterMeana = mean(a(clusterMask));
+    clusterMeanb = mean(b(clusterMask));
+
+
+    % Distanza cromatica dal colore medio della foglia
+    colorDistance = sqrt( ...
+        (clusterMeana - meanLeafA)^2 + ...
+        (clusterMeanb - meanLeafB)^2);
+
+
+    % Oscurità relativa rispetto alla foglia
+    darkness = max( ...
+        0, ...
+        meanLeafL - clusterMeanL);
+
+
+    % Percentuale di area occupata
+    areaRatio = ...
+        sum(clusterMask(:)) / sum(maskLeaf(:));
+
+
+    % Normalizzazione area
+    % Penalizza cluster enormi che rappresentano probabilmente
+    % la foglia sana
+    areaPenalty = 1 - areaRatio;
+
+
+    clusterColorDistance(c) = colorDistance;
+
+    clusterDarkness(c) = darkness;
+
+    clusterArea(c) = areaRatio;
+
+
+    % Score del cluster
+    %clusterScore(c) = ...
+    %    0.50 * colorDistance + ...
+    %    0.40 * darkness + ...
+    %    0.10 * areaPenalty;
+
+end
+
+%% ============================================================
+%% NORMALIZZAZIONE DEI PUNTEGGI DEI CLUSTER
+%% ============================================================
+
+colorDistanceNorm = normalizeRobust(clusterColorDistance);
+darknessNorm      = normalizeRobust(clusterDarkness);
+
+areaPenaltyNorm = normalizeRobust(areaPenalty);
+
+
+clusterScore = ...
+    0.50 * colorDistanceNorm + ...
+    0.40 * darknessNorm + ...
+    0.10 * areaPenaltyNorm;
+%% ============================================================
+%% 7) SELEZIONE DEI CLUSTER CANDIDATI
+%% ============================================================
+
+% Ordina i cluster in base allo score
+[~, sortedClusters] = sort( ...
+    clusterScore, ...
+    'descend');
+
+
+% Selezione dei due cluster più anomali
+%numCandidateClusters = min(2, NUM_CLUSTERS);
+numCandidateClusters = 1;
+
+candidateClusters = ...
+    sortedClusters(1:numCandidateClusters);
+
+
+% Maschera dei cluster candidati
+maskClusterCandidates = ...
+    ismember(pixelLabels, candidateClusters);
+
+
+maskClusterCandidates = ...
+    maskClusterCandidates & maskLeaf;
+
+
+%% ============================================================
+%% 8) LAB ANOMALY SCORE PIXEL-WISE
+%% ============================================================
+
+% Distanza cromatica pixel-wise
+colorAnomaly = sqrt( ...
+    (a - meanLeafA).^2 + ...
+    (b - meanLeafB).^2);
+
+
+% Anomalia di luminosità:
+% le regioni più scure della foglia ricevono valori maggiori
+darknessAnomaly = ...
+    max(0, meanLeafL - L);
+
+
+%% ------------------------------------------------------------
+% Normalizzazione robusta tramite percentili
+%% ------------------------------------------------------------
+
+colorValues = colorAnomaly(maskLeaf);
+
+darknessValues = darknessAnomaly(maskLeaf);
+
+
+colorLow = prctile(colorValues, 5);
+colorHigh = prctile(colorValues, 95);
+
+
+darkLow = prctile(darknessValues, 5);
+darkHigh = prctile(darknessValues, 95);
+
+
+colorAnomalyNorm = ...
+    (colorAnomaly - colorLow) ./ ...
+    (colorHigh - colorLow + eps);
+
+
+darknessAnomalyNorm = ...
+    (darknessAnomaly - darkLow) ./ ...
+    (darkHigh - darkLow + eps);
+
+
+% Limita i valori nell'intervallo [0,1]
+colorAnomalyNorm = ...
+    min(max(colorAnomalyNorm,0),1);
+
+
+darknessAnomalyNorm = ...
+    min(max(darknessAnomalyNorm,0),1);
+
+
+%% ============================================================
+%% 9) ANOMALY SCORE FINALE
+%% ============================================================
+
+% 50% anomalia cromatica
+% 50% anomalia di luminosità
+
+anomalyScore = ...
+    0.65 * colorAnomalyNorm + ...
+    0.35 * darknessAnomalyNorm;
+
+
+% Fuori dalla foglia = non malato
+anomalyScore(~maskLeaf) = 0;
+
+
+%% ============================================================
+%% 10) THRESHOLDING LOCALE
+%% ============================================================
+
+localThreshold = adaptthresh( ...
+    anomalyScore, ...
+    0.55, ...
+    'NeighborhoodSize', [31 31], ...
+    'Statistic', 'mean');
+
+
+maskLocal = imbinarize( ...
+    anomalyScore, ...
+    localThreshold);
+
+
+maskLocal = ...
+    maskLocal & maskLeaf;
+
+
+%% ============================================================
+%% 11) COMBINAZIONE K-MEANS + ANOMALY SCORE
+%% ============================================================
+
+% Un pixel viene considerato candidato se:
+%
+% 1) appartiene a un cluster anomalo
+% 2) supera il threshold locale
+%
+maskKMeans = ...
+    maskClusterCandidates & maskLocal;
+
+
+%% ============================================================
+%% 12) FALLBACK
+%% ============================================================
+
+% Se la maschera è troppo piccola, utilizziamo
+% la mappa di anomalia locale
+
+minDiseasePixels = 50;
+
+
+if sum(maskKMeans(:)) < minDiseasePixels
+
+    maskKMeans = maskLocal;
+
+end
+
+
+%% ============================================================
+%% 13) RIMOZIONE DEL RUMORE
+%% ============================================================
+
+maskKMeans = bwareaopen( ...
+    maskKMeans, ...
+    50);
+
+
+%% ============================================================
+%% 14) APERTURA MORFOLOGICA
+%% ============================================================
+
+maskKMeans = imopen( ...
+    maskKMeans, ...
+    strel('disk',2));
+
+
+%% ============================================================
+%% 15) CHIUSURA MORFOLOGICA
+%% ============================================================
+
+maskKMeans = imclose( ...
+    maskKMeans, ...
+    strel('disk',4));
+
+
+%% ============================================================
+%% 16) RIEMPIMENTO DEI BUCHI
+%% ============================================================
+
+maskKMeans = imfill( ...
+    maskKMeans, ...
+    'holes');
+
+
+%% ============================================================
+%% 17) LIMITAZIONE FINALE ALLA FOGLIA
+%% ============================================================
+
+maskKMeans = ...
+    maskKMeans & maskLeaf;
+
+
+%% ============================================================
+%% 18) PERCENTUALE DI INFEZIONE
+%% ============================================================
+
+leaf_pixels = sum(maskLeaf(:));
+
+disease_pixels = sum(maskKMeans(:));
+
+
+if leaf_pixels > 0
+
+    infection_percentage = ...
+        (disease_pixels / leaf_pixels) * 100;
+
+else
+
+    infection_percentage = 0;
+
+end
 
     %% Salvataggio ROI KMeans
 
@@ -210,7 +505,7 @@ for k = 1:num_images
     %% === KMEANS FEATURES ===
     featuresK = computeROITextureFeatures( ...
         I_gray_original,...
-        maskLeaf, ...
+        maskKMeans, ...
         GLCM_OFFSETS,...
         GLCM_NUM_LEVELS,...
         GLCM_SYMMETRIC);
@@ -219,7 +514,7 @@ for k = 1:num_images
     % === HISTOGRAM FEATURES ===
     featuresH = computeROITextureFeatures(...
         I_gray_original,...
-        maskLeaf,...
+        maskHist,...
         GLCM_OFFSETS,...
         GLCM_NUM_LEVELS,...
         GLCM_SYMMETRIC);
@@ -552,5 +847,18 @@ features = extractGLCMFeatures(...
     offsets,...
     numLevels,...
     symmetric);
+
+end
+
+function normalized = normalizeRobust(values)
+
+low = prctile(values,5);
+high = prctile(values,95);
+
+normalized = ...
+    (values - low) ./ ...
+    (high - low + eps);
+
+normalized = min(max(normalized,0),1);
 
 end
