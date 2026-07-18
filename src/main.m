@@ -19,7 +19,7 @@ GLCM_NUM_LEVELS = 128;
 %% =========================================================================
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'peacock_spot'); % Directory dove prelevare le immagini
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'aculus_olearius'); % Directory dove prelevare le immagini
 
 imageFiles = dir(fullfile(folder, '*.jpg'));
 if isempty(imageFiles)
@@ -207,24 +207,22 @@ for k = 1:num_images
 
     I_gray_noBackground(~maskLeaf)=0;
 
-    %% === ROI KMEANS ===
-
+    %% === KMEANS FEATURES ===
     featuresK = computeROITextureFeatures( ...
         I_gray_original,...
-        maskKMeans,...
+        maskLeaf, ...
         GLCM_OFFSETS,...
         GLCM_NUM_LEVELS,...
         GLCM_SYMMETRIC);
 
 
-    % === ROI HISTOGRAM ===
+    % === HISTOGRAM FEATURES ===
     featuresH = computeROITextureFeatures(...
         I_gray_original,...
-        maskHist,...
+        maskLeaf,...
         GLCM_OFFSETS,...
         GLCM_NUM_LEVELS,...
         GLCM_SYMMETRIC);
-
 
 values = double([ ...
 infection_percentage,...
@@ -240,82 +238,18 @@ featuresH.Homogeneity,...
 featuresH.Entropy
 ]);
 
-
 newRow = array2table(values,...
     'VariableNames',varNames(2:end));
-
 
 newRow = addvars(newRow,...
     string(imageFiles(k).name),...
     'Before',1,...
     'NewVariableNames','ImageName');
 
-
 allExtractedFeatures = [allExtractedFeatures; newRow];  
 imageFeatures = [imageFeatures; newRow];
     
     fprintf('Elaborata immagine %d/%d: %s (Area infetta: %.2f%%)\n', k, num_images, imageFiles(k).name, infection_percentage);
-end
-
-fprintf('\n==============================================================\n');
-fprintf('FEATURE PER SINGOLA IMMAGINE\n');
-fprintf('==============================================================\n');
-
-
-for i = 1:height(imageFeatures)
-
-    fprintf('\nImmagine: %s\n', imageFeatures.ImageName(i));
-
-    fprintf('Infezione: %.2f %%\n',...
-        imageFeatures.Infection_Percentage(i));
-
-
-    %% ============================
-    % KMEANS ROI
-    % ============================
-
-    fprintf('\n--- KMeans ROI ---\n');
-
-
-    fprintf('Energy       %.4f\n',...
-        imageFeatures.KMeans_Energy(i));
-
-    fprintf('Contrast     %.4f\n',...
-        imageFeatures.KMeans_Contrast(i));
-
-    fprintf('Correlation  %.4f\n',...
-        imageFeatures.KMeans_Correlation(i));
-
-    fprintf('Homogeneity  %.4f\n',...
-        imageFeatures.KMeans_Homogeneity(i));
-
-    fprintf('Entropy      %.4f\n',...
-        imageFeatures.KMeans_Entropy(i));
-
-
-
-    %% ============================
-    % HISTOGRAM ROI
-    % ============================
-
-    fprintf('\n--- Histogram ROI ---\n');
-
-
-    fprintf('Energy       %.4f\n',...
-        imageFeatures.Hist_Energy(i));
-
-    fprintf('Contrast     %.4f\n',...
-        imageFeatures.Hist_Contrast(i));
-
-    fprintf('Correlation  %.4f\n',...
-        imageFeatures.Hist_Correlation(i));
-
-    fprintf('Homogeneity  %.4f\n',...
-        imageFeatures.Hist_Homogeneity(i));
-
-    fprintf('Entropy      %.4f\n',...
-        imageFeatures.Hist_Entropy(i));
-
 end
 
 fprintf('\n==============================================================\n');
@@ -340,7 +274,7 @@ if height(validFeatures) > 1
     inf_perc = validFeatures.Infection_Percentage;
     
     fprintf('\n====================================================================================\n');
-    fprintf('ANALISI DESCRITTIVA DELLE FEATURE E CORRELAZIONE CON IL TARGET\n');
+    fprintf('CORRELAZIONE CON PERCENTUALE AREA INFETTA\n');
     fprintf('====================================================================================\n');
     
     % Estraiamo tutti i nomi delle colonne
@@ -352,9 +286,6 @@ if height(validFeatures) > 1
     for i = 1:length(featuresToProcess)
         featureName = featuresToProcess{i};
         featureData = validFeatures.(featureName);
-        
-        % Calcolo della Media della feature
-        mean_val = mean(featureData, 'omitnan');
         
         % Filtro validità per allineare gli array nel calcolo di Pearson
         validIdx = ~isnan(featureData) & ~isnan(inf_perc);
@@ -368,8 +299,8 @@ if height(validFeatures) > 1
         end
         
         % Stampa dei risultati formattata
-        fprintf('%-22s : Media = %10.4f | r (vs %% Inf) = %7.4f\n', ...
-                featureName, mean_val, r_val);
+        fprintf('%-22s : r = %7.4f\n', ...
+                featureName, r_val);
     end
     fprintf('====================================================================================\n');
 else
@@ -391,7 +322,6 @@ hsvImage = rgb2hsv(rgbImage);
 S = hsvImage(:,:,2);
 V = hsvImage(:,:,3);
 
-
 % Maschera basata sulla saturazione
 thresholdS = graythresh(S);
 
@@ -400,7 +330,6 @@ maskLeaf = S > thresholdS;
 
 % Elimina zone quasi bianche (spesso riflessi o sfondo chiaro)
 maskLeaf = maskLeaf & (V < 0.97);
-
 
 
 %% =====================================================
@@ -546,29 +475,16 @@ end
 
 function features = extractGLCMFeatures(grayROI, offsets, numLevels, symmetric)
 
-%==========================================================================
-% Estrazione feature GLCM
-%
-% INPUT
-%   grayROI     : immagine grayscale
-%   offsets     : offset GLCM
-%   numLevels   : numero livelli GLCM
-%   symmetric   : true/false
-%
-% OUTPUT
-%   features.Energy
-%   features.Contrast
-%   features.Correlation
-%   features.Homogeneity
-%   features.Entropy
-%==========================================================================
-
-grayROI = im2uint8(mat2gray(grayROI));
+% Rimuoviamo im2uint8 e mat2gray: se normalizzassimo l'immagine, 
+% comprometteremmo i NaN (im2uint8 li converte in 0).
+% Passiamo invece l'immagine double con i NaN direttamente a graycomatrix, 
+% forzando i limiti nativi [0 255] affinché i livelli (numLevels=128) siano costanti.
 
 glcm = graycomatrix(grayROI,...
     'Offset',offsets,...
     'NumLevels',numLevels,...
-    'Symmetric',symmetric);
+    'Symmetric',symmetric,...
+    'GrayLimits', [0 255]); 
 
 props = graycoprops(glcm);
 
@@ -577,18 +493,16 @@ entropyValues = zeros(1,size(glcm,3));
 for i=1:size(glcm,3)
 
     P = glcm(:,:,i);
-
     sumP = sum(P(:));
 
-if sumP > 0
-    P = P./sumP;
-else
-    entropyValues(i)=NaN;
-    continue
-end
+    if sumP > 0
+        P = P./sumP;
+    else
+        entropyValues(i)=NaN;
+        continue
+    end
 
     P = P(P>0);
-
     entropyValues(i) = -sum(P.*log(P));
 
 end
@@ -608,66 +522,31 @@ function features = computeROITextureFeatures( ...
                     numLevels,...
                     symmetric)
 
-%=====================================================================
-% Estrazione texture GLCM secondo approccio paper:
-%
-% Olive Spot Disease Detection and Classification using Analysis of
-% Leaf Image Textures
-%
-% Feature:
-%   - Energy
-%   - Contrast
-%   - Correlation
-%   - Homogeneity
-%   - Entropy
-%
-% La GLCM viene calcolata solamente sulla ROI segmentata.
-%=====================================================================
-
-
 features = struct();
 
-names = {'Energy',...
-         'Contrast',...
-         'Correlation',...
-         'Homogeneity',...
-         'Entropy'};
-
+names = {'Energy','Contrast','Correlation','Homogeneity','Entropy'};
 
 if sum(roiMask(:))==0
-
     for i=1:length(names)
         features.(names{i}) = NaN;
     end
-
     return
-
 end
 
-
 %% ROI malattia
+% È fondamentale convertire in double per poter iniettare i NaN
+roi = double(grayImage);
 
-roi = grayImage;
+% I pixel non infetti vengono ignorati matematicamente
+roi(~roiMask) = NaN; 
 
-roi(~roiMask)=0;
-
-
-%% Bounding box automatica solo per ridurre dimensione
-
+%% Bounding box automatica solo per ridurre la dimensione della matrice
 stats = regionprops(roiMask,'BoundingBox');
-
 bbox = stats(1).BoundingBox;
 
-
 roi = imcrop(roi,bbox);
-mask = imcrop(roiMask,bbox);
-
-
-roi(~mask)=0;
-
 
 %% GLCM
-
 features = extractGLCMFeatures(...
     roi,...
     offsets,...
