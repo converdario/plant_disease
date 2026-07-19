@@ -1,860 +1,616 @@
-clear, clc
+clear;
+clc;
+close all;
+
 warning('off', 'images:graycomatrix:scaledImageContainsNan');
 warning('off', 'stats:kmeans:FailedToConvergeRep');
 
-%% =========================================================================
-%% CONFIGURAZIONE PARAMETRI 
-%% =========================================================================
+% =========================================================================
+% CONFIGURAZIONE
+% =========================================================================
 
-% --- Parametri Segmentazione K-Means ---
-NUM_CLUSTERS = 3; 
-
-% --- Parametri Estrazione Feature (GLCM) ---
-GLCM_OFFSETS = [0 1; -1 1; -1 0; -1 -1]; 
+NUM_CLUSTERS = 3;
+GLCM_OFFSETS = [
+    0  1;     % 0°
+    -1  1;     % 45°
+    -1  0;     % 90°
+    -1 -1      % 135°
+    ];
 GLCM_SYMMETRIC = true;
-GLCM_NUM_LEVELS = 128; 
+GLCM_NUM_LEVELS = 128;
 
-%% =========================================================================
-%% INIZIALIZZAZIONE
-%% =========================================================================
+% =========================================================================
+% CARTELLE
+% =========================================================================
 
 currentScriptFolder = fileparts(mfilename('fullpath'));
-folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'peacock_spot'); % Directory dove prelevare le immagini
-
-imageFiles = dir(fullfile(folder, '*.jpg'));
-if isempty(imageFiles)
-    imageFiles = dir(fullfile(folder, '*.JPG'));
-end
-num_images = length(imageFiles);
-
-varNames = {...
-'ImageName', ...
-'Infection_Percentage', ...
-'KMeans_Energy', ...
-'KMeans_Contrast', ...
-'KMeans_Correlation', ...
-'KMeans_Homogeneity', ...
-'KMeans_Entropy', ...
-'Hist_Energy', ...
-'Hist_Contrast', ...
-'Hist_Correlation', ...
-'Hist_Homogeneity', ...
-'Hist_Entropy'};
-
-varTypes = [{'string'}, repmat({'double'},1,length(varNames)-1)];
-
-allExtractedFeatures = table( ...
-    'Size',[0,length(varNames)], ...
-    'VariableTypes',varTypes,...
-    'VariableNames',varNames);
-
-imageFeatures = table( ...
-    'Size',[0,length(varNames)], ...
-    'VariableTypes',varTypes,...
-    'VariableNames',varNames);
+%Percorso cartella del dataset
+folder = fullfile(currentScriptFolder, '..', 'public', 'dataset', 'peacock_spot');
 
 outputKMeans = fullfile(folder, 'ROI_KMeans');
-outputHist   = fullfile(folder, 'ROI_Histogram');
+if ~exist(outputKMeans, 'dir')
+    mkdir(outputKMeans);
+end
+outputHist = fullfile(folder, 'ROI_Histogram');
+if ~exist(outputHist, 'dir')
+    mkdir(outputHist);
+end
 outputNoBackground = fullfile(folder, 'NoBackground');
-
 if ~exist(outputNoBackground, 'dir')
     mkdir(outputNoBackground);
 end
 
-if ~exist(outputKMeans, 'dir'), mkdir(outputKMeans); end
-if ~exist(outputHist, 'dir'), mkdir(outputHist); end
+% =========================================================================
+% LETTURA IMMAGINI
+% =========================================================================
 
-%% =========================================================================
-%% CICLO PRINCIPALE ELABORAZIONE IMMAGINI
-%% =========================================================================
+imageFiles = dir(fullfile(folder, '*.jpg'));
+num_images = length(imageFiles);
+if num_images == 0
+    error('Nessuna immagine JPG trovata nella cartella:\n%s', folder);
+end
+fprintf('Numero immagini trovate: %d\n', num_images);
+fprintf('============================================================\n');
+
+% =========================================================================
+% TABELLA RISULTATI
+% =========================================================================
+
+varNames = { ...
+    'ImageName', ...
+    'KMeans_Infection_Percentage', ...
+    'KMeans_Energy', ...
+    'KMeans_Contrast', ...
+    'KMeans_Correlation', ...
+    'KMeans_Homogeneity', ...
+    'KMeans_Entropy', ...
+    'Histogram_Infection_Percentage', ...
+    'Hist_Energy', ...
+    'Hist_Contrast', ...
+    'Hist_Correlation', ...
+    'Hist_Homogeneity', ...
+    'Hist_Entropy' ...
+};
+varTypes = [{'string'}, repmat({'double'}, 1, length(varNames)-1)];
+allFeatures = table( ...
+'Size', [0, length(varNames)], ...
+'VariableTypes', varTypes, ...
+'VariableNames', varNames ...
+);
+
+% =========================================================================
+% CICLO PRINCIPALE
+% =========================================================================
 
 for k = 1:num_images
-    filename = fullfile(folder, imageFiles(k).name);
+    fprintf( ...
+        'Elaborazione immagine %d/%d: %s\n', ...
+        k, ...
+        num_images, ...
+        imageFiles(k).name);
+
+    % -------------------------------------------------------------
+    % LETTURA IMMAGINE
+    % -------------------------------------------------------------
+
+    filename = fullfile( ...
+        folder, ...
+        imageFiles(k).name);
+
     rgbImage = imread(filename);
+
+    % Assicura un'immagine RGB
+    if size(rgbImage, 3) == 1
+        rgbImage = repmat(rgbImage, [1 1 3]);
+    end
+
+    % -------------------------------------------------------------
+    % CONVERSIONE LAB
+    % -------------------------------------------------------------
 
     labImage = rgb2lab(rgbImage);
     L = labImage(:,:,1);
     a = labImage(:,:,2);
     b = labImage(:,:,3);
 
-    %% --- RIMOZIONE SFONDO ---
-    maskLeaf = removeBackgroundSuperpixel(rgbImage);
+    % =============================================================
+    % RIMOZIONE DELLO SFONDO
+    % =============================================================
 
-    %% --- SALVATAGGIO IMMAGINE SENZA SFONDO ---
+    maskLeaf = removeBackground(rgbImage);
+
+    % Se la segmentazione fallisce
+    if nnz(maskLeaf) == 0
+        warning('Maschera foglia vuota per %s', imageFiles(k).name);
+        continue;
+    end
+
+    % -------------------------------------------------------------
+    % SALVATAGGIO IMMAGINE SENZA SFONDO
+    % -------------------------------------------------------------
+
     rgbNoBackground = rgbImage;
-    
     for ch = 1:3
         temp = rgbNoBackground(:,:,ch);
-        temp(~maskLeaf) = 0;          % imposta lo sfondo a nero
+        temp(~maskLeaf) = 0;
         rgbNoBackground(:,:,ch) = temp;
     end
-    
-    imwrite(rgbNoBackground, ...
-        fullfile(outputNoBackground, ['NB_', imageFiles(k).name]));
 
-%% ============================================================
-%% SEGMENTAZIONE MALATTIA
-%% K-MEANS + LAB ANOMALY SCORE
-%% + THRESHOLDING LOCALE + MORFOLOGIA
-%% ============================================================
+    imwrite(rgbNoBackground, fullfile( ...
+        outputNoBackground, ...
+        ['NB_' imageFiles(k).name] ...
+        ));
 
+    % =============================================================
+    % K-MEANS SEGMENTATION
+    % =============================================================
 
-%% ------------------------------------------------------------
-% 1) Conversione nello spazio LAB
-%% ------------------------------------------------------------
+    % Pixel appartenenti alla foglia
+    leafPixels = find(maskLeaf);
+    leafPixels = leafPixels(:);
+    L_values = L(leafPixels);
+    a_values = a(leafPixels);
+    b_values = b(leafPixels);
+    dataLAB = [L_values, a_values, b_values];
 
-labImage = rgb2lab(rgbImage);
+    [clusterLabels, clusterCenters] = kmeans( ...
+        dataLAB, NUM_CLUSTERS, ...
+        'Distance', 'sqeuclidean', ...
+        'Replicates', 10, ...
+        'MaxIter', 500, ...
+        'Start', 'plus');
+    clusterLabels = clusterLabels(:);
 
-L = labImage(:,:,1);
-a = labImage(:,:,2);
-b = labImage(:,:,3);
-
-
-%% ------------------------------------------------------------
-% 2) Estrazione dei soli pixel della foglia
-%% ------------------------------------------------------------
-
-leafPixels = find(maskLeaf);
-
-dataLab = [ ...
-    L(leafPixels), ...
-    a(leafPixels), ...
-    b(leafPixels)];
-
-
-%% ------------------------------------------------------------
-% 3) K-MEANS
-%% ------------------------------------------------------------
-
-[idx, centers] = kmeans( ...
-    dataLab, ...
-    NUM_CLUSTERS, ...
-    'Replicates', 10, ...
-    'MaxIter', 500, ...
-    'Start', 'plus');
-
-
-%% ------------------------------------------------------------
-% 4) Ricostruzione della mappa dei cluster
-%% ------------------------------------------------------------
-
-pixelLabels = zeros(size(maskLeaf));
-
-pixelLabels(leafPixels) = idx;
-
-
-%% ------------------------------------------------------------
-% 5) COLORE MEDIO DELLA FOGLIA
-%% ------------------------------------------------------------
-
-meanLeafL = mean(L(maskLeaf));
-meanLeafA = mean(a(maskLeaf));
-meanLeafB = mean(b(maskLeaf));
-
-
-stdLeafL = std(L(maskLeaf));
-stdLeafA = std(a(maskLeaf));
-stdLeafB = std(b(maskLeaf));
-
-
-%% ============================================================
-%% 6) ANALISI DEI CLUSTER
-%% ============================================================
-
-clusterScore = zeros(NUM_CLUSTERS,1);
-
-clusterColorDistance = zeros(NUM_CLUSTERS,1);
-
-clusterDarkness = zeros(NUM_CLUSTERS,1);
-
-clusterArea = zeros(NUM_CLUSTERS,1);
-
-
-for c = 1:NUM_CLUSTERS
-
-    clusterMask = ...
-        (pixelLabels == c) & maskLeaf;
-
-
-    if sum(clusterMask(:)) == 0
-
-        clusterScore(c) = -Inf;
-
-        continue
-
+    % Controllo finale
+    if numel(leafPixels) ~= numel(clusterLabels)
+        error('Errore K-Means: pixel foglia = %d, labels = %d', numel(leafPixels), numel(clusterLabels));
     end
 
-
-    % Colore medio del cluster
-    clusterMeanL = mean(L(clusterMask));
-    clusterMeana = mean(a(clusterMask));
-    clusterMeanb = mean(b(clusterMask));
-
-
-    % Distanza cromatica dal colore medio della foglia
-    colorDistance = sqrt( ...
-        (clusterMeana - meanLeafA)^2 + ...
-        (clusterMeanb - meanLeafB)^2);
-
-
-    % Oscurità relativa rispetto alla foglia
-    darkness = max( ...
-        0, ...
-        meanLeafL - clusterMeanL);
-
-
-    % Percentuale di area occupata
-    areaRatio = ...
-        sum(clusterMask(:)) / sum(maskLeaf(:));
-
-
-    % Normalizzazione area
-    % Penalizza cluster enormi che rappresentano probabilmente
-    % la foglia sana
-    areaPenalty = 1 - areaRatio;
-
-
-    clusterColorDistance(c) = colorDistance;
-
-    clusterDarkness(c) = darkness;
-
-    clusterArea(c) = areaRatio;
-
-
-    % Score del cluster
-    %clusterScore(c) = ...
-    %    0.50 * colorDistance + ...
-    %    0.40 * darkness + ...
-    %    0.10 * areaPenalty;
-
-end
-
-%% ============================================================
-%% NORMALIZZAZIONE DEI PUNTEGGI DEI CLUSTER
-%% ============================================================
-
-colorDistanceNorm = normalizeRobust(clusterColorDistance);
-darknessNorm      = normalizeRobust(clusterDarkness);
-
-areaPenaltyNorm = normalizeRobust(areaPenalty);
-
-
-clusterScore = ...
-    0.50 * colorDistanceNorm + ...
-    0.40 * darknessNorm + ...
-    0.10 * areaPenaltyNorm;
-%% ============================================================
-%% 7) SELEZIONE DEI CLUSTER CANDIDATI
-%% ============================================================
-
-% Ordina i cluster in base allo score
-[~, sortedClusters] = sort( ...
-    clusterScore, ...
-    'descend');
-
-
-% Selezione dei due cluster più anomali
-%numCandidateClusters = min(2, NUM_CLUSTERS);
-numCandidateClusters = 1;
-
-candidateClusters = ...
-    sortedClusters(1:numCandidateClusters);
-
-
-% Maschera dei cluster candidati
-maskClusterCandidates = ...
-    ismember(pixelLabels, candidateClusters);
-
-
-maskClusterCandidates = ...
-    maskClusterCandidates & maskLeaf;
-
-
-%% ============================================================
-%% 8) LAB ANOMALY SCORE PIXEL-WISE
-%% ============================================================
-
-% Distanza cromatica pixel-wise
-colorAnomaly = sqrt( ...
-    (a - meanLeafA).^2 + ...
-    (b - meanLeafB).^2);
-
-
-% Anomalia di luminosità:
-% le regioni più scure della foglia ricevono valori maggiori
-darknessAnomaly = ...
-    max(0, meanLeafL - L);
-
-
-%% ------------------------------------------------------------
-% Normalizzazione robusta tramite percentili
-%% ------------------------------------------------------------
-
-colorValues = colorAnomaly(maskLeaf);
-
-darknessValues = darknessAnomaly(maskLeaf);
-
-
-colorLow = prctile(colorValues, 5);
-colorHigh = prctile(colorValues, 95);
-
-
-darkLow = prctile(darknessValues, 5);
-darkHigh = prctile(darknessValues, 95);
-
-
-colorAnomalyNorm = ...
-    (colorAnomaly - colorLow) ./ ...
-    (colorHigh - colorLow + eps);
-
-
-darknessAnomalyNorm = ...
-    (darknessAnomaly - darkLow) ./ ...
-    (darkHigh - darkLow + eps);
-
-
-% Limita i valori nell'intervallo [0,1]
-colorAnomalyNorm = ...
-    min(max(colorAnomalyNorm,0),1);
-
-
-darknessAnomalyNorm = ...
-    min(max(darknessAnomalyNorm,0),1);
-
-
-%% ============================================================
-%% 9) ANOMALY SCORE FINALE
-%% ============================================================
-
-% 50% anomalia cromatica
-% 50% anomalia di luminosità
-
-anomalyScore = ...
-    0.65 * colorAnomalyNorm + ...
-    0.35 * darknessAnomalyNorm;
-
-
-% Fuori dalla foglia = non malato
-anomalyScore(~maskLeaf) = 0;
-
-
-%% ============================================================
-%% 10) THRESHOLDING LOCALE
-%% ============================================================
-
-localThreshold = adaptthresh( ...
-    anomalyScore, ...
-    0.55, ...
-    'NeighborhoodSize', [31 31], ...
-    'Statistic', 'mean');
-
-
-maskLocal = imbinarize( ...
-    anomalyScore, ...
-    localThreshold);
-
-
-maskLocal = ...
-    maskLocal & maskLeaf;
-
-
-%% ============================================================
-%% 11) COMBINAZIONE K-MEANS + ANOMALY SCORE
-%% ============================================================
-
-% Un pixel viene considerato candidato se:
-%
-% 1) appartiene a un cluster anomalo
-% 2) supera il threshold locale
-%
-maskKMeans = ...
-    maskClusterCandidates & maskLocal;
-
-
-%% ============================================================
-%% 12) FALLBACK
-%% ============================================================
-
-% Se la maschera è troppo piccola, utilizziamo
-% la mappa di anomalia locale
-
-minDiseasePixels = 50;
-
-
-if sum(maskKMeans(:)) < minDiseasePixels
-
-    maskKMeans = maskLocal;
-
-end
-
-
-%% ============================================================
-%% 13) RIMOZIONE DEL RUMORE
-%% ============================================================
-
-maskKMeans = bwareaopen( ...
-    maskKMeans, ...
-    50);
-
-
-%% ============================================================
-%% 14) APERTURA MORFOLOGICA
-%% ============================================================
-
-maskKMeans = imopen( ...
-    maskKMeans, ...
-    strel('disk',2));
-
-
-%% ============================================================
-%% 15) CHIUSURA MORFOLOGICA
-%% ============================================================
-
-maskKMeans = imclose( ...
-    maskKMeans, ...
-    strel('disk',4));
-
-
-%% ============================================================
-%% 16) RIEMPIMENTO DEI BUCHI
-%% ============================================================
-
-maskKMeans = imfill( ...
-    maskKMeans, ...
-    'holes');
-
-
-%% ============================================================
-%% 17) LIMITAZIONE FINALE ALLA FOGLIA
-%% ============================================================
-
-maskKMeans = ...
-    maskKMeans & maskLeaf;
-
-
-%% ============================================================
-%% 18) PERCENTUALE DI INFEZIONE
-%% ============================================================
-
-leaf_pixels = sum(maskLeaf(:));
-
-disease_pixels = sum(maskKMeans(:));
-
-
-if leaf_pixels > 0
-
-    infection_percentage = ...
-        (disease_pixels / leaf_pixels) * 100;
-
-else
-
-    infection_percentage = 0;
-
-end
-
-    %% Salvataggio ROI KMeans
-
-    ROI_kmeans = rgbImage;
+    pixelLabels = zeros(size(maskLeaf));
+    pixelLabels(leafPixels) = clusterLabels;
     
-    for ch=1:3
-        
-        temp = ROI_kmeans(:,:,ch);
-        
-        temp(~maskKMeans)=0;
-        
-        ROI_kmeans(:,:,ch)=temp;
+    % =============================================================
+    % SELEZIONE DEL CLUSTER INFETTO
+    % =============================================================
     
+    % Per selezionare la regione candidata alla malattia, viene utilizzato 
+    % il cluster cromaticamente più distante dal colore medio della foglia.
+    
+    meanLeafA = mean(a(maskLeaf));
+    meanLeafB = mean(b(maskLeaf));
+    clusterDistances = zeros(NUM_CLUSTERS, 1);
+    
+    for c = 1:NUM_CLUSTERS
+        clusterMask = pixelLabels == c & maskLeaf;
+        if nnz(clusterMask) == 0
+            clusterDistances(c) = -Inf;
+            continue;
+        end
+        clusterMeanA = mean(a(clusterMask));
+        clusterMeanB = mean(b(clusterMask));
+        clusterDistances(c) = sqrt((clusterMeanA - meanLeafA)^2 + (clusterMeanB - meanLeafB)^2);
     end
     
+    % Cluster cromaticamente più distante
+    [~, diseaseCluster] = max(clusterDistances);
+    maskKMeans = pixelLabels == diseaseCluster;
+    maskKMeans = maskKMeans & maskLeaf;
     
-    imwrite(ROI_kmeans,...
-    fullfile(outputKMeans,...
-    ['K_',imageFiles(k).name]));
-
-    %% --- THRESHOLDING SU CANALE a* (Metodo di confronto) ---
-    aChannel = mat2gray(a);
-    level = graythresh(aChannel);
-    maskHist = imbinarize(aChannel,level);
-
-    % scelgo la polarità con meno pixel
-    if sum(maskHist(:)) > 0.5*sum(maskLeaf(:))
-        maskHist = ~maskHist;
+    % -------------------------------------------------------------
+    % PULIZIA MINIMA DELLA ROI K-MEANS
+    % -------------------------------------------------------------
+    
+    maskKMeans = bwareaopen(maskKMeans, 20);
+    maskKMeans = imopen(maskKMeans, strel('disk', 1));
+    maskKMeans = maskKMeans & maskLeaf;
+    
+    % -------------------------------------------------------------
+    % PERCENTUALE AREA INFETTA K-MEANS
+    % -------------------------------------------------------------
+    
+    leafPixelsCount = nnz(maskLeaf);
+    diseasePixelsCount = nnz(maskKMeans);
+    
+    if leafPixelsCount > 0
+        kmeansInfectionPercentage = 100 * diseasePixelsCount / leafPixelsCount;
+    else
+        kmeansInfectionPercentage = NaN;
     end
     
+    % -------------------------------------------------------------
+    % SALVATAGGIO ROI K-MEANS
+    % -------------------------------------------------------------
+    
+    ROI_KMeans = rgbImage;
+    for ch = 1:3
+        temp = ROI_KMeans(:,:,ch);
+        temp(~maskKMeans) = 0;
+        ROI_KMeans(:,:,ch) = temp;
+    end
+    
+    imwrite(ROI_KMeans, fullfile( ...
+            outputKMeans, ...
+            ['K_' imageFiles(k).name] ...
+            ));
+    
+    
+    % =============================================================
+    % HISTOGRAM THRESHOLDING SUL CANALE a*
+    % =============================================================
+    
+    aLeaf = a(maskLeaf);
+    
+    % Normalizzazione del canale a*
+    aLeafNormalized = mat2gray(aLeaf);
+    
+    % Soglia globale di Otsu
+    level = graythresh(aLeafNormalized);
+    
+    % Canale a* normalizzato dell'intera immagine
+    aNormalized = mat2gray(a);
+
+    % Due possibili polarità
+    maskHist1 = aNormalized >= level;
+    maskHist2 = aNormalized < level;
+    
+    % Limite alla foglia
+    maskHist1 = maskHist1 & maskLeaf;
+    maskHist2 = maskHist2 & maskLeaf;
+    
+    % -------------------------------------------------------------
+    % SELEZIONE DELLA POLARITÀ
+    % -------------------------------------------------------------
+    
+    % Il canale a* può separare la regione malata in una delle
+    % due polarità.
+    %
+    % Viene scelta la regione più piccola, assumendo che la
+    % regione malata sia una porzione minoritaria della foglia.
+    
+    area1 = nnz(maskHist1);
+    area2 = nnz(maskHist2);
+    if area1 < area2
+        maskHist = maskHist1;
+    else
+        maskHist = maskHist2;
+    end
+    
+    % -------------------------------------------------------------
+    % PULIZIA MINIMA DELLA MASCHERA HISTOGRAM
+    % -------------------------------------------------------------
+    
+    maskHist = bwareaopen(maskHist, 20);
+    maskHist = imopen(maskHist, strel('disk', 1));
     maskHist = maskHist & maskLeaf;
     
-    ROI_hist = rgbImage;
-    for ch = 1:3
-        temp_img = ROI_hist(:,:,ch);
-        temp_img(~maskHist) = 0;
-        ROI_hist(:,:,ch) = temp_img;
-    end
-    imwrite(ROI_hist, fullfile(outputHist, ['H_', imageFiles(k).name]));
-
-    %% --- MATRICE GLCM ED ESTRAZIONE FEATURE ---
-    I_gray_original = uint8(rgb2gray(rgbImage));
-
-    I_gray_noBackground = I_gray_original;
-
-    I_gray_noBackground(~maskLeaf)=0;
-
-    %% === KMEANS FEATURES ===
-    featuresK = computeROITextureFeatures( ...
-        I_gray_original,...
-        maskKMeans, ...
-        GLCM_OFFSETS,...
-        GLCM_NUM_LEVELS,...
-        GLCM_SYMMETRIC);
-
-
-    % === HISTOGRAM FEATURES ===
-    featuresH = computeROITextureFeatures(...
-        I_gray_original,...
-        maskHist,...
-        GLCM_OFFSETS,...
-        GLCM_NUM_LEVELS,...
-        GLCM_SYMMETRIC);
-
-values = double([ ...
-infection_percentage,...
-featuresK.Energy,...
-featuresK.Contrast,...
-featuresK.Correlation,...
-featuresK.Homogeneity,...
-featuresK.Entropy,...
-featuresH.Energy,...
-featuresH.Contrast,...
-featuresH.Correlation,...
-featuresH.Homogeneity,...
-featuresH.Entropy
-]);
-
-newRow = array2table(values,...
-    'VariableNames',varNames(2:end));
-
-newRow = addvars(newRow,...
-    string(imageFiles(k).name),...
-    'Before',1,...
-    'NewVariableNames','ImageName');
-
-allExtractedFeatures = [allExtractedFeatures; newRow];  
-imageFeatures = [imageFeatures; newRow];
+    % -------------------------------------------------------------
+    % PERCENTUALE AREA INFETTA HISTOGRAM
+    % -------------------------------------------------------------
     
-    fprintf('Elaborata immagine %d/%d: %s (Area infetta: %.2f%%)\n', k, num_images, imageFiles(k).name, infection_percentage);
+    histDiseasePixels = nnz(maskHist);
+    if leafPixelsCount > 0
+        histInfectionPercentage = 100 * histDiseasePixels / leafPixelsCount;
+    else
+        histInfectionPercentage = NaN;
+    end
+    
+    % -------------------------------------------------------------
+    % SALVATAGGIO ROI HISTOGRAM
+    % -------------------------------------------------------------
+    
+    ROI_Hist = rgbImage;
+    for ch = 1:3
+        temp = ROI_Hist(:,:,ch);
+        temp(~maskHist) = 0;
+        ROI_Hist(:,:,ch) = temp;
+    end
+    
+    imwrite(ROI_Hist, fullfile( ...
+            outputHist, ...
+            ['H_' imageFiles(k).name] ...
+            ));
+    
+    % =============================================================
+    % GLCM
+    % =============================================================
+    
+    % FEATURE DI K-MEANS
+    grayImage = rgb2gray(rgbImage);
+    featuresKMeans = ...
+        computeROITextureFeatures( ...
+            grayImage, ...
+            maskKMeans, ...
+            GLCM_OFFSETS, ...
+            GLCM_NUM_LEVELS, ...
+            GLCM_SYMMETRIC);
+    
+    % FEATURE DI HISTOGRAM
+    featuresHist = ...
+        computeROITextureFeatures( ...
+            grayImage, ...
+            maskHist, ...
+            GLCM_OFFSETS, ...
+            GLCM_NUM_LEVELS, ...
+            GLCM_SYMMETRIC);
+    
+    % =============================================================
+    % CREAZIONE RIGA RISULTATI
+    % =============================================================
+    
+    values = [
+        kmeansInfectionPercentage
+        featuresKMeans.Energy
+        featuresKMeans.Contrast
+        featuresKMeans.Correlation
+        featuresKMeans.Homogeneity
+        featuresKMeans.Entropy
+        histInfectionPercentage
+        featuresHist.Energy
+        featuresHist.Contrast
+        featuresHist.Correlation
+        featuresHist.Homogeneity
+        featuresHist.Entropy
+    ]';
+    
+    newRow = array2table(values, ...
+        'VariableNames', varNames(2:end));
+    
+    newRow = addvars(newRow, ...
+        string(imageFiles(k).name), 'Before', 1, 'NewVariableNames', 'ImageName');
+    
+    allFeatures = [
+        allFeatures
+        newRow
+    ];
 end
 
-fprintf('\n==============================================================\n');
+fprintf('\n============================================================\n');
 
-%% =========================================================================
-%% SALVATAGGIO FINALE E CALCOLO CORRELAZIONE
-%% =========================================================================
+% =========================================================================
+% SALVATAGGIO RISULTATI
+% =========================================================================
 
-outputFilePath = fullfile(folder, 'all_extracted_texture_features.mat');
-save(outputFilePath, ...
-    'allExtractedFeatures',...
-    'imageFeatures');
+outputFilePath = fullfile(folder, 'features.mat');
+save(outputFilePath, 'allFeatures');
 
-fprintf('\nTutte le feature sono state estratte e salvate in:\n%s\n', outputFilePath);
+fprintf('RISULTATI SALVATI IN:\n%s', outputFilePath);
+fprintf('\n============================================================\n');
 
-% Rimuove le righe dove la percentuale di infezione è NaN
-validRows = ~isnan(allExtractedFeatures.Infection_Percentage);
-validFeatures = allExtractedFeatures(validRows, :);
+% =========================================================================
+% CORRELAZIONE CON PERCENTUALE AREA INFETTA
+% =========================================================================
+
+fprintf('\n============================================================\n');
+fprintf('CORRELAZIONI K-MEANS');
+fprintf('\n============================================================\n');
+
+validRows = ~isnan(allFeatures.KMeans_Infection_Percentage);
+validFeatures = allFeatures(validRows, :);
 
 if height(validFeatures) > 1
-    % Isoliamo il target
-    inf_perc = validFeatures.Infection_Percentage;
-    
-    fprintf('\n====================================================================================\n');
-    fprintf('CORRELAZIONE CON PERCENTUALE AREA INFETTA\n');
-    fprintf('====================================================================================\n');
-    
-    % Estraiamo tutti i nomi delle colonne
-    allVarNames = validFeatures.Properties.VariableNames;
-    
-    % Escludiamo 'ImageName' e il target 'Infection_Percentage' dal ciclo
-    featuresToProcess = setdiff(allVarNames, {'ImageName', 'Infection_Percentage'}, 'stable');
+    target = validFeatures.KMeans_Infection_Percentage;
+    featureNames = {
+        'KMeans_Energy'
+        'KMeans_Contrast'
+        'KMeans_Correlation'
+        'KMeans_Homogeneity'
+        'KMeans_Entropy'
+    };
 
-    for i = 1:length(featuresToProcess)
-        featureName = featuresToProcess{i};
+    for i = 1:length(featureNames)
+        featureName = featureNames{i};
         featureData = validFeatures.(featureName);
-        
-        % Filtro validità per allineare gli array nel calcolo di Pearson
-        validIdx = ~isnan(featureData) & ~isnan(inf_perc);
-        
-        if sum(validIdx) > 1
-            % Calcolo matrice di correlazione tra feature corrente e target
-            R_matrix = corrcoef(featureData(validIdx), inf_perc(validIdx));
-            r_val = R_matrix(1,2);
+        validIdx = ~isnan(featureData) & ~isnan(target);
+
+        if nnz(validIdx) > 1
+            R = corrcoef(featureData(validIdx), target(validIdx));
+            r = R(1,2);
         else
-            r_val = NaN;
+            r = NaN;
         end
-        
-        % Stampa dei risultati formattata
-        fprintf('%-22s : r = %7.4f\n', ...
-                featureName, r_val);
+
+        fprintf('%-25s : r = %7.4f\n', featureName, r);
     end
-    fprintf('====================================================================================\n');
 else
-    disp('Non ci sono abbastanza immagini valide per calcolare la correlazione.');
+    fprintf('Numero insufficiente di immagini valide.\n');
 end
 
-%% =========================================================================
-%% FUNZIONI AUSILIARIE (Rimozione Sfondo)
-%% =========================================================================
+fprintf('\n============================================================\n');
+fprintf('CORRELAZIONI HISTOGRAM');
+fprintf('\n============================================================\n');
 
-function maskLeaf = removeBackgroundSuperpixel(rgbImage)
+validRows = ~isnan(allFeatures.Histogram_Infection_Percentage);
+validFeatures = allFeatures(validRows, :);
+if height(validFeatures) > 1
+    target = validFeatures.Histogram_Infection_Percentage;
+    featureNames = {
+        'Hist_Energy'
+        'Hist_Contrast'
+        'Hist_Correlation'
+        'Hist_Homogeneity'
+        'Hist_Entropy'
+    };
+    
+    for i = 1:length(featureNames)
+        featureName = featureNames{i};
+        featureData = validFeatures.(featureName);
+        validIdx = ~isnan(featureData) & ~isnan(target);
 
-%% =====================================================
-% 1) Segmentazione iniziale HSV
-% ======================================================
+        if nnz(validIdx) > 1
+            R = corrcoef(featureData(validIdx), target(validIdx));
+            r = R(1,2);
+        else
+            r = NaN;
+        end
 
-hsvImage = rgb2hsv(rgbImage);
-
-S = hsvImage(:,:,2);
-V = hsvImage(:,:,3);
-
-% Maschera basata sulla saturazione
-thresholdS = graythresh(S);
-
-maskLeaf = S > thresholdS;
-
-
-% Elimina zone quasi bianche (spesso riflessi o sfondo chiaro)
-maskLeaf = maskLeaf & (V < 0.97);
-
-
-%% =====================================================
-% 2) Pulizia iniziale
-% ======================================================
-
-maskLeaf = imfill(maskLeaf,'holes');
-
-maskLeaf = bwareaopen(maskLeaf,1000);
-
-maskLeaf = imclose(maskLeaf,strel('disk',10));
-
-maskLeaf = imfill(maskLeaf,'holes');
-
-
-
-%% =====================================================
-% 3) Mantiene solo la foglia principale
-% ======================================================
-
-CC = bwconncomp(maskLeaf);
-
-
-if CC.NumObjects > 0
-
-    areas = cellfun(@numel,CC.PixelIdxList);
-
-    [~,idx] = max(areas);
-
-    tempMask = false(size(maskLeaf));
-
-    tempMask(CC.PixelIdxList{idx}) = true;
-
-    maskLeaf = tempMask;
-
+        fprintf('%-25s : r = %7.4f\n', featureName, r);
+    end    
+else
+    fprintf('Numero insufficiente di immagini valide.\n');
 end
 
+% =========================================================================
+% FUNZIONE RIMOZIONE SFONDO
+% =========================================================================
 
+function maskLeaf = removeBackground(rgbImage)
 
-%% =====================================================
-% 4) Raffinamento colore LAB
-% ======================================================
-
-labImage = rgb2lab(rgbImage);
-
-
-L = labImage(:,:,1);
-A = labImage(:,:,2);
-B = labImage(:,:,3);
-
-
-
-% Colore medio della foglia individuata
-
-leafPixels = find(maskLeaf);
-
-
-meanLeafColor = [
-    mean(L(leafPixels))
-    mean(A(leafPixels))
-    mean(B(leafPixels))
-    ];
-
-
-
-% distanza LAB di ogni pixel dal colore della foglia
-
-colorDistance = sqrt( ...
-    (L-meanLeafColor(1)).^2 + ...
-    (A-meanLeafColor(2)).^2 + ...
-    (B-meanLeafColor(3)).^2 );
-
-
-
-% soglia adattiva:
-% prende il 95% dei pixel della foglia trovata
-
-leafDistance = colorDistance(maskLeaf);
-
-thresholdLAB = prctile(leafDistance,85);
-
-
-
-% mantiene solo pixel compatibili con la foglia
-
-refinedMask = colorDistance < thresholdLAB;
-
-
-
-%% =====================================================
-% 5) Vincolo spaziale
-%    evita che ritorni lo sfondo lontano
-% ======================================================
-
-% permette una piccola espansione del bordo
-
-allowedRegion = imdilate(maskLeaf,strel('disk',15));
-
-
-refinedMask = refinedMask & allowedRegion;
-
-
-
-%% =====================================================
-% 6) Pulizia finale
-% ======================================================
-
-maskLeaf = refinedMask;
-
-
-maskLeaf = imfill(maskLeaf,'holes');
-
-
-maskLeaf = bwareaopen(maskLeaf,500);
-
-
-maskLeaf = imclose(maskLeaf,strel('disk',8));
-
-
-%% =====================================================
-% 7) Ultimo controllo componente maggiore
-% ======================================================
-
-CC = bwconncomp(maskLeaf);
-
-
-if CC.NumObjects > 1
-
-    areas = cellfun(@numel,CC.PixelIdxList);
-
-    [~,idx] = max(areas);
-
-    finalMask=false(size(maskLeaf));
-
-    finalMask(CC.PixelIdxList{idx})=true;
-
-    maskLeaf=finalMask;
-
+    % -------------------------------------------------------------
+    % CONVERSIONE HSV
+    % -------------------------------------------------------------
+    
+    hsvImage = rgb2hsv(rgbImage);
+    S = hsvImage(:,:,2);
+    
+    % -------------------------------------------------------------
+    % SEGMENTAZIONE INIZIALE
+    % -------------------------------------------------------------
+    
+    % La saturazione è utilizzata per separare la foglia dallo sfondo.
+    thresholdS = graythresh(S);
+    maskLeaf = S > thresholdS;
+    
+    % -------------------------------------------------------------
+    % PULIZIA
+    % -------------------------------------------------------------
+    
+    maskLeaf = imopen(maskLeaf, strel('disk', 3));
+    maskLeaf = imclose(maskLeaf, strel('disk', 10));
+    maskLeaf = imfill(maskLeaf, 'holes');
+    maskLeaf = bwareaopen(maskLeaf, 500); 
+    
+    % -------------------------------------------------------------
+    % MANTIENI LA COMPONENTE PRINCIPALE
+    % -------------------------------------------------------------
+    
+    CC = bwconncomp(maskLeaf);
+    if CC.NumObjects > 0
+        areas = cellfun(@numel, CC.PixelIdxList);
+        [~, largestComponent] = max(areas);
+        newMask = false(size(maskLeaf));
+        newMask(CC.PixelIdxList{largestComponent}) = true;
+        maskLeaf = newMask;
+    end
+    
+    % -------------------------------------------------------------
+    % RAFFINAMENTO MORFOLOGICO
+    % -------------------------------------------------------------
+    
+    maskLeaf = imclose(maskLeaf, strel('disk', 5));
+    maskLeaf = imfill(maskLeaf, 'holes');
+    
+    % -------------------------------------------------------------
+    % ULTIMO CONTROLLO
+    % -------------------------------------------------------------
+    
+    CC = bwconncomp(maskLeaf);
+    if CC.NumObjects > 1
+        areas = cellfun(@numel, CC.PixelIdxList);
+        [~, largestComponent] = max(areas);
+        finalMask = false(size(maskLeaf));
+        finalMask(CC.PixelIdxList{largestComponent}) = true;
+        maskLeaf = finalMask;
+    end
 end
 
+% =========================================================================
+% ESTRAZIONE FEATURE GLCM
+% =========================================================================
 
-end
+function features = computeROITextureFeatures(grayImage, roiMask, offsets, numLevels, symmetric)
+    featureNames = {
+        'Energy'
+        'Contrast'
+        'Correlation'
+        'Homogeneity'
+        'Entropy'
+    };
+    
+    % -------------------------------------------------------------
+    % ROI VUOTA
+    % -------------------------------------------------------------
+    
+    if nnz(roiMask) == 0
+        for i = 1:length(featureNames)
+            features.(featureNames{i}) = NaN;
+        end
+        return;
+    end
+    
+    % -------------------------------------------------------------
+    % BOUNDING BOX
+    % -------------------------------------------------------------
+    
+    stats = regionprops(roiMask, 'BoundingBox');
+    if isempty(stats)
+        for i = 1:length(featureNames)
+            features.(featureNames{i}) = NaN;
+        end
+        return;
+    end
+    
+    % Per sicurezza, si considera la componente principale della ROI.
+    CC = bwconncomp(roiMask);
+    areas = cellfun(@numel, CC.PixelIdxList);
+    [~, largestComponent] = max(areas);
+    mainMask = false(size(roiMask));
+    mainMask(CC.PixelIdxList{largestComponent}) = true;
+    
+    bbox = regionprops(mainMask, 'BoundingBox');
+    bbox = bbox.BoundingBox;
 
-function features = extractGLCMFeatures(grayROI, offsets, numLevels, symmetric)
-
-% Rimuoviamo im2uint8 e mat2gray: se normalizzassimo l'immagine, 
-% comprometteremmo i NaN (im2uint8 li converte in 0).
-% Passiamo invece l'immagine double con i NaN direttamente a graycomatrix, 
-% forzando i limiti nativi [0 255] affinché i livelli (numLevels=128) siano costanti.
-
-glcm = graycomatrix(grayROI,...
-    'Offset',offsets,...
-    'NumLevels',numLevels,...
-    'Symmetric',symmetric,...
-    'GrayLimits', [0 255]); 
-
-props = graycoprops(glcm);
-
-entropyValues = zeros(1,size(glcm,3));
-
-for i=1:size(glcm,3)
-
-    P = glcm(:,:,i);
-    sumP = sum(P(:));
-
-    if sumP > 0
-        P = P./sumP;
-    else
-        entropyValues(i)=NaN;
-        continue
+    % -------------------------------------------------------------
+    % CROP
+    % -------------------------------------------------------------
+    
+    x1 = max(1, floor(bbox(1)));
+    y1 = max(1, floor(bbox(2)));
+    x2 = min(size(grayImage,2), ceil(bbox(1) + bbox(3)));
+    y2 = min(size(grayImage,1), ceil(bbox(2) + bbox(4)));
+    
+    roiGray = grayImage(y1:y2, x1:x2);
+    roiMaskCrop = mainMask(y1:y2, x1:x2);
+    roiGray = double(roiGray);
+    
+    % La GLCM viene calcolata utilizzando l'intera bounding box,
+    % ma i pixel esterni alla ROI vengono esclusi tramite NaN.
+    roiGray(~roiMaskCrop) = NaN;
+    
+    % -------------------------------------------------------------
+    % GLCM
+    % -------------------------------------------------------------
+    
+    glcm = graycomatrix( ...
+        roiGray, ...
+        'Offset', offsets, ...
+        'NumLevels', numLevels, ...
+        'GrayLimits', [0 255], ...
+        'Symmetric', symmetric);
+    props = graycoprops(glcm);
+    
+    % -------------------------------------------------------------
+    % ENTROPIA
+    % -------------------------------------------------------------
+    
+    entropyValues = NaN(1, size(glcm,3));
+    for i = 1:size(glcm,3)
+        P = glcm(:,:,i);
+        total = sum(P(:));
+        if total == 0
+            continue;
+        end
+        P = P ./ total;
+        P = P(P > 0);
+        entropyValues(i) = -sum(P .* log2(P));
     end
 
-    P = P(P>0);
-    entropyValues(i) = -sum(P.*log(P));
-
-end
-
-features.Energy      = mean(props.Energy);
-features.Contrast    = mean(props.Contrast);
-features.Correlation = mean(props.Correlation);
-features.Homogeneity = mean(props.Homogeneity);
-features.Entropy     = mean(entropyValues);
-
-end
-
-function features = computeROITextureFeatures( ...
-                    grayImage,...
-                    roiMask,...
-                    offsets,...
-                    numLevels,...
-                    symmetric)
-
-features = struct();
-
-names = {'Energy','Contrast','Correlation','Homogeneity','Entropy'};
-
-if sum(roiMask(:))==0
-    for i=1:length(names)
-        features.(names{i}) = NaN;
-    end
-    return
-end
-
-%% ROI malattia
-% È fondamentale convertire in double per poter iniettare i NaN
-roi = double(grayImage);
-
-% I pixel non infetti vengono ignorati matematicamente
-roi(~roiMask) = NaN; 
-
-%% Bounding box automatica solo per ridurre la dimensione della matrice
-stats = regionprops(roiMask,'BoundingBox');
-bbox = stats(1).BoundingBox;
-
-roi = imcrop(roi,bbox);
-
-%% GLCM
-features = extractGLCMFeatures(...
-    roi,...
-    offsets,...
-    numLevels,...
-    symmetric);
-
-end
-
-function normalized = normalizeRobust(values)
-
-low = prctile(values,5);
-high = prctile(values,95);
-
-normalized = ...
-    (values - low) ./ ...
-    (high - low + eps);
-
-normalized = min(max(normalized,0),1);
-
+    % -------------------------------------------------------------
+    % MEDIA DELLE QUATTRO DIREZIONI
+    % -------------------------------------------------------------
+    
+    features.Energy = mean(props.Energy, 'omitnan');
+    features.Contrast = mean(props.Contrast, 'omitnan');
+    features.Correlation = mean(props.Correlation, 'omitnan');
+    features.Homogeneity = mean(props.Homogeneity, 'omitnan');
+    features.Entropy = mean(entropyValues, 'omitnan');
 end
