@@ -471,10 +471,6 @@ end
     fullfile(outputKMeans,...
     ['K_',imageFiles(k).name]));
 
-    
-
-
-
     %% --- THRESHOLDING SU CANALE a* (Metodo di confronto) ---
     aChannel = mat2gray(a);
     level = graythresh(aChannel);

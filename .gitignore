@@ -1,7 +1,4 @@
 /public/dataset/peacock_spot/ROI_Histogram
 /public/dataset/peacock_spot/ROI_KMeans
 /public/dataset/peacock_spot/NoBackground
-/public/dataset/aculus_olearius/ROI_Histogram
-/public/dataset/aculus_olearius/ROI_KMeans
-/public/dataset/aculus_olearius/NoBackground
 *.mat
